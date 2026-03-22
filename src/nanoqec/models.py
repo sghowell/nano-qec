@@ -16,24 +16,52 @@ class LayoutSpec:
     """Model-facing view of the stored detector representation."""
 
     detector_count: int
-    time_bucket_indices: list[list[int]]
+    time_steps: int
     max_time_bucket_size: int
+    gather_index_grid: list[list[int]]
+    detector_index_grid: list[list[int]]
+    coord_grid: list[list[list[float]]]
+    valid_mask_grid: list[list[bool]]
 
     @classmethod
     def from_manifest(cls, manifest: DatasetManifest) -> LayoutSpec:
         representation = manifest.representation
+        max_time_bucket_size = int(representation["max_time_bucket_size"])
+        time_bucket_indices = [
+            [int(index) for index in bucket]
+            for bucket in representation["time_bucket_indices"]
+        ]
+        normalized_xy = [
+            [float(value) for value in coordinates]
+            for coordinates in representation["normalized_xy"]
+        ]
+        gather_index_grid: list[list[int]] = []
+        detector_index_grid: list[list[int]] = []
+        coord_grid: list[list[list[float]]] = []
+        valid_mask_grid: list[list[bool]] = []
+        for bucket in time_bucket_indices:
+            gather_row = [0] * max_time_bucket_size
+            detector_row = [0] * max_time_bucket_size
+            coord_row = [[0.0, 0.0] for _ in range(max_time_bucket_size)]
+            valid_row = [False] * max_time_bucket_size
+            for slot, detector_index in enumerate(bucket):
+                gather_row[slot] = detector_index + 1
+                detector_row[slot] = detector_index + 1
+                coord_row[slot] = list(normalized_xy[detector_index])
+                valid_row[slot] = True
+            gather_index_grid.append(gather_row)
+            detector_index_grid.append(detector_row)
+            coord_grid.append(coord_row)
+            valid_mask_grid.append(valid_row)
         return cls(
             detector_count=int(manifest.detector_count),
-            time_bucket_indices=[
-                [int(index) for index in bucket]
-                for bucket in representation["time_bucket_indices"]
-            ],
-            max_time_bucket_size=int(representation["max_time_bucket_size"]),
+            time_steps=len(time_bucket_indices),
+            max_time_bucket_size=max_time_bucket_size,
+            gather_index_grid=gather_index_grid,
+            detector_index_grid=detector_index_grid,
+            coord_grid=coord_grid,
+            valid_mask_grid=valid_mask_grid,
         )
-
-    @property
-    def time_steps(self) -> int:
-        return len(self.time_bucket_indices)
 
 
 def default_model_spec(model_name: str, layout: LayoutSpec) -> dict[str, Any]:
@@ -41,10 +69,13 @@ def default_model_spec(model_name: str, layout: LayoutSpec) -> dict[str, Any]:
 
     if model_name == "minimal_aq2":
         return {
-            "d_model": 32,
+            "d_model": 64,
+            "n_blocks": 2,
+            "n_transformer_per_block": 2,
             "nhead": 4,
             "dropout": 0.0,
-            "feedforward_mult": 2,
+            "feedforward_mult": 4,
+            "group_size": 2,
             "time_steps": layout.time_steps,
             "max_time_bucket_size": layout.max_time_bucket_size,
         }
@@ -68,86 +99,239 @@ def build_model(
     raise ValueError(f"unknown model: {model_name}")
 
 
+def parameter_count(model: nn.Module) -> int:
+    """Return the number of trainable model parameters."""
+
+    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+
+
+class DetectorGatedRecurrence(nn.Module):
+    """A lightweight gated recurrence cell shared across detector positions."""
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.gate = nn.Linear(2 * d_model, d_model)
+        self.candidate = nn.Linear(2 * d_model, d_model)
+
+    def forward(self, hidden: Tensor, inputs: Tensor) -> Tensor:
+        joined = torch.cat([hidden, inputs], dim=-1)
+        gate = torch.sigmoid(self.gate(joined))
+        candidate = torch.tanh(self.candidate(joined))
+        return gate * hidden + (1.0 - gate) * candidate
+
+
+class SpatialTransformer(nn.Module):
+    """A small stack of spatial self-attention layers."""
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dropout: float,
+        feedforward_mult: int,
+        n_layers: int,
+    ) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dim_feedforward=d_model * feedforward_mult,
+                    dropout=dropout,
+                    batch_first=True,
+                    activation="gelu",
+                )
+                for _ in range(n_layers)
+            ]
+        )
+
+    def forward(self, inputs: Tensor, key_padding_mask: Tensor) -> Tensor:
+        hidden = inputs
+        for layer in self.layers:
+            hidden = layer(hidden, src_key_padding_mask=key_padding_mask)
+        return hidden
+
+
+class AQ2Block(nn.Module):
+    """One AQ2-style temporal-plus-spatial processing block."""
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dropout: float,
+        feedforward_mult: int,
+        n_transformer_per_block: int,
+    ) -> None:
+        super().__init__()
+        self.recurrence = DetectorGatedRecurrence(d_model)
+        self.spatial = SpatialTransformer(
+            d_model=d_model,
+            nhead=nhead,
+            dropout=dropout,
+            feedforward_mult=feedforward_mult,
+            n_layers=n_transformer_per_block,
+        )
+
+    def forward(self, inputs: Tensor, valid_mask: Tensor) -> Tensor:
+        batch_size, time_steps, token_count, hidden_dim = inputs.shape
+        hidden = inputs.new_zeros((batch_size, token_count, hidden_dim))
+        outputs: list[Tensor] = []
+        for time_index in range(time_steps):
+            key_padding_mask = ~valid_mask[time_index].unsqueeze(0).expand(batch_size, -1)
+            hidden = self.recurrence(hidden, inputs[:, time_index, :, :])
+            hidden = self.spatial(hidden, key_padding_mask=key_padding_mask)
+            outputs.append(hidden)
+        return torch.stack(outputs, dim=1)
+
+
+class TemporalCompression(nn.Module):
+    """Compress consecutive time summaries before the final recurrent readout."""
+
+    def __init__(self, d_model: int, group_size: int) -> None:
+        super().__init__()
+        self.group_size = group_size
+        self.projection = nn.Linear(d_model * group_size, d_model)
+
+    def forward(self, sequence: Tensor) -> Tensor:
+        if self.group_size <= 1:
+            return sequence
+        batch_size, time_steps, hidden_dim = sequence.shape
+        pad_steps = (-time_steps) % self.group_size
+        if pad_steps:
+            padding = sequence.new_zeros((batch_size, pad_steps, hidden_dim))
+            sequence = torch.cat([sequence, padding], dim=1)
+        grouped_steps = sequence.shape[1] // self.group_size
+        reshaped = sequence.reshape(batch_size, grouped_steps, hidden_dim * self.group_size)
+        return self.projection(reshaped)
+
+
+class SequenceGatedRecurrence(nn.Module):
+    """A gated recurrence over pooled time summaries."""
+
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.gate = nn.Linear(2 * d_model, d_model)
+        self.candidate = nn.Linear(2 * d_model, d_model)
+
+    def forward(self, sequence: Tensor) -> Tensor:
+        hidden = sequence.new_zeros((sequence.shape[0], sequence.shape[-1]))
+        for time_index in range(sequence.shape[1]):
+            inputs = sequence[:, time_index, :]
+            joined = torch.cat([hidden, inputs], dim=-1)
+            gate = torch.sigmoid(self.gate(joined))
+            candidate = torch.tanh(self.candidate(joined))
+            hidden = gate * hidden + (1.0 - gate) * candidate
+        return hidden
+
+
 class MinimalAQ2Decoder(nn.Module):
-    """A small AQ2-style baseline using spatial attention and temporal recurrence."""
+    """A stronger AQ2-style baseline using detector-aware spatial-temporal modeling."""
 
     def __init__(
         self,
         layout: LayoutSpec,
         d_model: int,
+        n_blocks: int,
+        n_transformer_per_block: int,
         nhead: int,
         dropout: float,
         feedforward_mult: int,
+        group_size: int,
         time_steps: int,
         max_time_bucket_size: int,
     ) -> None:
         super().__init__()
         self.layout = layout
-        self.scalar_projection = nn.Linear(1, d_model)
-        self.slot_embedding = nn.Embedding(max_time_bucket_size, d_model)
+        self.event_projection = nn.Linear(1, d_model)
+        self.detector_embedding = nn.Embedding(layout.detector_count + 1, d_model)
+        self.coordinate_projection = nn.Linear(2, d_model)
         self.time_embedding = nn.Embedding(time_steps, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * feedforward_mult,
-            dropout=dropout,
-            batch_first=True,
-            activation="gelu",
+        self.input_dropout = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList(
+            [
+                AQ2Block(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dropout=dropout,
+                    feedforward_mult=feedforward_mult,
+                    n_transformer_per_block=n_transformer_per_block,
+                )
+                for _ in range(n_blocks)
+            ]
         )
-        self.spatial_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=1,
-            enable_nested_tensor=False,
-        )
-        self.temporal_recurrence = nn.GRU(input_size=d_model, hidden_size=d_model, batch_first=True)
+        self.temporal_compression = TemporalCompression(d_model=d_model, group_size=group_size)
+        self.summary_recurrence = SequenceGatedRecurrence(d_model=d_model)
         self.head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(d_model, 1),
+        )
+        self.register_buffer(
+            "gather_index_grid",
+            torch.tensor(layout.gather_index_grid, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "detector_index_grid",
+            torch.tensor(layout.detector_index_grid, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "coord_grid",
+            torch.tensor(layout.coord_grid, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "valid_mask_grid",
+            torch.tensor(layout.valid_mask_grid, dtype=torch.bool),
+            persistent=False,
+        )
+        self.register_buffer(
+            "time_index_grid",
+            torch.arange(time_steps, dtype=torch.long),
+            persistent=False,
         )
 
     def forward(self, detector_events: Tensor) -> Tensor:
-        padded_events, valid_mask = self._to_padded_time_buckets(detector_events)
-        token_states = self.scalar_projection(padded_events.unsqueeze(-1))
-        slot_ids = torch.arange(self.layout.max_time_bucket_size, device=detector_events.device)
-        time_ids = torch.arange(self.layout.time_steps, device=detector_events.device)
-        token_states = token_states + self.slot_embedding(slot_ids)[None, None, :, :]
-        token_states = token_states + self.time_embedding(time_ids)[None, :, None, :]
+        bucketed_events = self._to_bucket_grid(detector_events)
+        hidden = self.event_projection(bucketed_events.unsqueeze(-1))
+        hidden = hidden + self.detector_embedding(self.detector_index_grid)[None, :, :, :]
+        hidden = hidden + self.coordinate_projection(self.coord_grid)[None, :, :, :]
+        hidden = hidden + self.time_embedding(self.time_index_grid)[None, :, None, :]
+        hidden = self.input_dropout(hidden)
+        valid_mask = self.valid_mask_grid
+        hidden = hidden * valid_mask[None, :, :, None].to(hidden.dtype)
 
-        summaries: list[Tensor] = []
-        for time_index in range(self.layout.time_steps):
-            time_slice = token_states[:, time_index, :, :]
-            key_padding_mask = ~valid_mask[time_index].unsqueeze(0).expand(
-                detector_events.shape[0], -1
-            )
-            encoded = self.spatial_encoder(time_slice, src_key_padding_mask=key_padding_mask)
-            valid = valid_mask[time_index].to(encoded.dtype).view(1, -1, 1)
-            pooled = (encoded * valid).sum(dim=1) / valid.sum(dim=1).clamp_min(1.0)
-            summaries.append(pooled)
+        for block in self.blocks:
+            hidden = block(hidden, valid_mask=valid_mask)
 
-        temporal_input = torch.stack(summaries, dim=1)
-        _, hidden = self.temporal_recurrence(temporal_input)
-        logits = self.head(hidden[-1]).squeeze(-1)
-        return logits
+        pooled = self._masked_mean(hidden, valid_mask)
+        compressed = self.temporal_compression(pooled)
+        summary = self.summary_recurrence(compressed)
+        return self.head(summary).squeeze(-1)
 
-    def _to_padded_time_buckets(self, detector_events: Tensor) -> tuple[Tensor, Tensor]:
+    def _to_bucket_grid(self, detector_events: Tensor) -> Tensor:
         batch_size = detector_events.shape[0]
-        padded = detector_events.new_zeros(
-            (batch_size, self.layout.time_steps, self.layout.max_time_bucket_size)
+        padded = torch.cat(
+            [detector_events.new_zeros((batch_size, 1)), detector_events],
+            dim=1,
         )
-        valid_mask = torch.zeros(
-            (self.layout.time_steps, self.layout.max_time_bucket_size),
-            dtype=torch.bool,
-            device=detector_events.device,
+        gathered = padded.index_select(1, self.gather_index_grid.reshape(-1))
+        bucketed = gathered.reshape(
+            batch_size,
+            self.layout.time_steps,
+            self.layout.max_time_bucket_size,
         )
-        for time_index, bucket in enumerate(self.layout.time_bucket_indices):
-            bucket_tensor = torch.tensor(bucket, dtype=torch.long, device=detector_events.device)
-            bucket_values = detector_events.index_select(dim=1, index=bucket_tensor)
-            bucket_size = len(bucket)
-            padded[:, time_index, :bucket_size] = bucket_values
-            valid_mask[time_index, :bucket_size] = True
-        return padded, valid_mask
+        return bucketed * self.valid_mask_grid[None, :, :].to(bucketed.dtype)
+
+    @staticmethod
+    def _masked_mean(hidden: Tensor, valid_mask: Tensor) -> Tensor:
+        weights = valid_mask[None, :, :, None].to(hidden.dtype)
+        return (hidden * weights).sum(dim=2) / weights.sum(dim=2).clamp_min(1.0)
 
 
 class TrivialLinearDecoder(nn.Module):

@@ -14,16 +14,16 @@ from nanoqec.train_cli import run_train
 
 
 def build_dataset(tmp_path: Path) -> Path:
-    """Prepare a small deterministic dataset and return its manifest path."""
-
     prepare_args = parse_prepare_args(
         [
             "--workspace",
             str(tmp_path),
+            "--profile",
+            "local-d3-v1",
             "--train-shots",
-            "96",
-            "--val-shots",
             "48",
+            "--val-shots",
+            "24",
         ]
     )
     summary = run_prepare(prepare_args)
@@ -31,8 +31,6 @@ def build_dataset(tmp_path: Path) -> Path:
 
 
 def parse_result_line(output: str) -> dict[str, object]:
-    """Parse the stable RESULT line from train.py output."""
-
     prefix = "RESULT "
     for line in output.splitlines():
         if line.startswith(prefix):
@@ -41,8 +39,6 @@ def parse_result_line(output: str) -> dict[str, object]:
 
 
 def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
-    """Both the baseline and an alternate model should pass through the same harness."""
-
     manifest_path = build_dataset(tmp_path)
     common_args = [
         "--workspace",
@@ -50,17 +46,21 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
         "--dataset-manifest",
         str(manifest_path),
         "--duration-seconds",
+        "0.4",
+        "--eval-interval-seconds",
         "0.2",
         "--batch-size",
         "16",
         "--device",
         "cpu",
+        "--skip-experiment-log",
     ]
 
     baseline_metrics = run_train(parse_train_args(common_args))
     baseline_output = capsys.readouterr().out
     baseline_result = parse_result_line(baseline_output)
     assert Path(baseline_metrics["checkpoint_path"]).exists()
+    assert Path(baseline_metrics["best_checkpoint_path"]).exists()
     assert Path(baseline_metrics["metrics_path"]).exists()
     assert {"run_id", "val_ler", "mwpm_ratio", "kept"} <= baseline_result.keys()
 
@@ -72,7 +72,7 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
                 "--dataset-manifest",
                 str(manifest_path),
                 "--checkpoint",
-                baseline_metrics["checkpoint_path"],
+                baseline_metrics["best_checkpoint_path"],
                 "--device",
                 "cpu",
             ]
@@ -82,8 +82,11 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
     assert Path(eval_summary["result_path"]).exists()
     eval_payload = json.loads(eval_output.strip())
     assert eval_payload["model_name"] == "minimal_aq2"
+    assert len(eval_payload["per_slice"]) == 5
 
-    alt_metrics = run_train(parse_train_args([*common_args, "--model-name", "trivial_linear"]))
+    alt_metrics = run_train(
+        parse_train_args([*common_args, "--model-name", "trivial_linear"])
+    )
     alt_output = capsys.readouterr().out
     alt_result = parse_result_line(alt_output)
     assert Path(alt_metrics["checkpoint_path"]).exists()
@@ -97,9 +100,10 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
                 "--dataset-manifest",
                 str(manifest_path),
                 "--checkpoint",
-                alt_metrics["checkpoint_path"],
+                alt_metrics["best_checkpoint_path"],
                 "--device",
                 "cpu",
+                "--skip-plot",
             ]
         )
     )
