@@ -51,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--train-seed", type=int, default=20260323)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
-    parser.add_argument("--optimizer", choices=["adamw", "lion"], default="adamw")
+    parser.add_argument("--optimizer", choices=["adamw", "lion"], default="lion")
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--results-dir", type=Path, default=Path("results/train"))
