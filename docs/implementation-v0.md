@@ -88,7 +88,11 @@ Required behavior:
 - train a stronger minimal AQ2-style model by default
 - support at least one alternate model implementation to prove architecture
   replaceability
+- support optional fixed-budget schedule controls without changing the public
+  artifact contracts
 - periodically evaluate across all validation slices and save `best.pt`
+- record periodic aggregate eval history in the metrics artifact so fixed-budget
+  training runs can be diagnosed after the fact
 - calibrate a global decision threshold on the training split before writing
   final metrics and checkpoints
 - write checkpoint metadata sufficient for `eval.py` to reconstruct the model
@@ -154,6 +158,9 @@ Required fields:
 Current checkpoints should also include `decision_threshold`. `eval.py`
 defaults to `0.5` when loading older local checkpoints that predate threshold
 calibration.
+
+Current `train_config` payloads should record the optimizer and any active
+schedule controls so repeated-run tuning sweeps can be reproduced exactly.
 
 ### Runtime Experiment Record
 

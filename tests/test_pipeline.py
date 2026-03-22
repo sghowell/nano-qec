@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import torch
+
 from nanoqec.eval_cli import parse_args as parse_eval_args
 from nanoqec.eval_cli import run_eval
 from nanoqec.prepare_cli import parse_args as parse_prepare_args
@@ -53,6 +55,12 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
         "16",
         "--device",
         "cpu",
+        "--scheduler",
+        "warmup_cosine",
+        "--warmup-fraction",
+        "0.2",
+        "--min-learning-rate-scale",
+        "0.2",
         "--skip-experiment-log",
     ]
 
@@ -65,6 +73,14 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
     assert Path(baseline_metrics["metrics_path"]).exists()
     assert {"run_id", "val_ler", "mwpm_ratio", "kept"} <= baseline_result.keys()
     assert "decision_threshold" in baseline_metrics_payload
+    assert baseline_metrics_payload["scheduler"] == "warmup_cosine"
+    assert baseline_metrics_payload["eval_history"]
+    checkpoint_payload = torch.load(
+        baseline_metrics["best_checkpoint_path"],
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert checkpoint_payload["metadata"]["train_config"]["scheduler"] == "warmup_cosine"
 
     eval_summary = run_eval(
         parse_eval_args(

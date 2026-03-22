@@ -105,11 +105,13 @@ def test_tuning_script_runs_one_repeat(tmp_path: Path) -> None:
         "--dataset-manifest",
         str(manifest_path),
         "--config",
-        "baseline",
+        "warmup_cosine",
         "--repeats",
-        "2",
+        "1",
         "--duration-seconds",
         "0.1",
+        "--duration-seconds",
+        "0.2",
         "--eval-interval-seconds",
         "0.1",
         "--device",
@@ -119,10 +121,15 @@ def test_tuning_script_runs_one_repeat(tmp_path: Path) -> None:
     assert summary_path.exists()
     summary_payload = json.loads(summary_path.read_text())
     assert summary_payload["schema_version"] == "nanoqec.tuning.v1"
-    assert summary_payload["configs"][0]["config_name"] == "baseline"
-    assert summary_payload["configs"][0]["repeat_count"] == 2
-    assert len(summary_payload["configs"][0]["runs"]) == 2
-    assert [run["train_seed"] for run in summary_payload["configs"][0]["runs"]] == [
+    assert summary_payload["duration_seconds_sweep"] == [0.1, 0.2]
+    assert [config["config_name"] for config in summary_payload["configs"]] == [
+        "warmup_cosine",
+        "warmup_cosine",
+    ]
+    assert [config["duration_seconds"] for config in summary_payload["configs"]] == [0.1, 0.2]
+    assert all(config["repeat_count"] == 1 for config in summary_payload["configs"])
+    assert all(len(config["runs"]) == 1 for config in summary_payload["configs"])
+    assert [config["runs"][0]["train_seed"] for config in summary_payload["configs"]] == [
         20260323,
-        20260324,
+        20260323,
     ]

@@ -112,5 +112,16 @@ uv run pytest
 ```bash
 uv run python scripts/check_improvement.py --metrics-json results/train/<run>.json
 uv run python scripts/plot_progress.py --experiment-log results/experiments.jsonl --output results/progress.png
-uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --config baseline --config adamw --config lr1e3 --repeats 3 --duration-seconds 30 --eval-interval-seconds 5
+uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
 ```
+
+`train.py` also supports an optional time-based warmup+cosine learning-rate
+schedule for fixed-budget runs:
+
+```bash
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --scheduler warmup_cosine --warmup-fraction 0.1 --min-learning-rate-scale 0.1
+```
+
+Training metrics JSON now includes `eval_history`, which records periodic
+aggregate validation snapshots across the run so plateauing and schedule effects
+can be diagnosed after the fact.

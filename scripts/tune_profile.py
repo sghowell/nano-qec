@@ -41,6 +41,18 @@ CONFIG_PRESETS: dict[str, ConfigPreset] = {
         description="AdamW at 1e-3 for a higher-learning-rate comparison.",
         train_args=("--optimizer", "adamw", "--learning-rate", "1e-3"),
     ),
+    "warmup_cosine": ConfigPreset(
+        name="warmup_cosine",
+        description="Lion with a time-based warmup+cosine learning-rate schedule.",
+        train_args=(
+            "--scheduler",
+            "warmup_cosine",
+            "--warmup-fraction",
+            "0.1",
+            "--min-learning-rate-scale",
+            "0.1",
+        ),
+    ),
 }
 
 
@@ -58,7 +70,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Named preset to evaluate. Repeat to test multiple configs.",
     )
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--duration-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--duration-seconds",
+        dest="durations",
+        action="append",
+        type=float,
+        help="Training duration in seconds. Repeat to sweep multiple budgets.",
+    )
     parser.add_argument("--eval-interval-seconds", type=float, default=5.0)
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="cpu")
     parser.add_argument("--base-train-seed", type=int, default=20260323)
@@ -81,8 +99,25 @@ def parse_result_line(output: str) -> dict[str, Any]:
 def resolve_configs(config_names: list[str] | None) -> list[ConfigPreset]:
     """Return the requested config presets or the default sweep set."""
 
-    names = config_names or ["baseline", "adamw", "lr1e3"]
+    names = config_names or ["baseline", "warmup_cosine", "adamw", "lr1e3"]
     return [CONFIG_PRESETS[name] for name in names]
+
+
+def resolve_durations(duration_values: list[float] | None) -> list[float]:
+    """Return the requested duration sweep or the default budget."""
+
+    durations = duration_values or [30.0]
+    if any(duration <= 0.0 for duration in durations):
+        raise ValueError("--duration-seconds values must be positive")
+    return [float(duration) for duration in durations]
+
+
+def format_duration_label(duration_seconds: float) -> str:
+    """Convert a duration into a stable path label."""
+
+    if float(duration_seconds).is_integer():
+        return f"{int(duration_seconds)}s"
+    return f"{duration_seconds:g}s".replace(".", "p")
 
 
 def load_primary_metrics(metrics_payload: dict[str, Any]) -> tuple[float, float]:
@@ -169,13 +204,19 @@ def run_single_training(
     workspace: Path,
     dataset_manifest: Path,
     preset: ConfigPreset,
+    duration_seconds: float,
     repeat_index: int,
     sweep_id: str,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """Run one fixed-budget training job and return structured results."""
 
-    repeat_dir = Path(sweep_id) / preset.name / f"repeat-{repeat_index:02d}"
+    repeat_dir = (
+        Path(sweep_id)
+        / preset.name
+        / format_duration_label(duration_seconds)
+        / f"repeat-{repeat_index:02d}"
+    )
     train_seed = args.base_train_seed + repeat_index - 1
     checkpoint_dir = (workspace / args.checkpoint_root / repeat_dir).resolve()
     results_dir = (workspace / args.results_root / repeat_dir).resolve()
@@ -185,7 +226,7 @@ def run_single_training(
         dataset_manifest=dataset_manifest,
         device=args.device,
         train_seed=train_seed,
-        duration_seconds=args.duration_seconds,
+        duration_seconds=duration_seconds,
         eval_interval_seconds=args.eval_interval_seconds,
         checkpoint_dir=checkpoint_dir,
         results_dir=results_dir,
@@ -214,11 +255,16 @@ def run_single_training(
         "examples_seen": int(metrics_payload["examples_seen"]),
         "metrics_path": str(metrics_path),
         "best_checkpoint_path": str(checkpoint_dir / "best.pt"),
+        "duration_seconds": duration_seconds,
     }
 
 
-def summarize_config_runs(preset: ConfigPreset, runs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate repeated runs for one config preset."""
+def summarize_config_runs(
+    preset: ConfigPreset,
+    duration_seconds: float,
+    runs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate repeated runs for one config preset and duration."""
 
     val_lers = [float(run["aggregate_val_ler"]) for run in runs]
     mwpm_ratios = [float(run["aggregate_mwpm_ratio"]) for run in runs]
@@ -227,6 +273,7 @@ def summarize_config_runs(preset: ConfigPreset, runs: list[dict[str, Any]]) -> d
         "config_name": preset.name,
         "description": preset.description,
         "train_args": list(preset.train_args),
+        "duration_seconds": duration_seconds,
         "repeat_count": len(runs),
         "mean_val_ler": safe_mean(val_lers),
         "stdev_val_ler": safe_pstdev(val_lers),
@@ -251,28 +298,32 @@ def main(argv: list[str] | None = None) -> int:
     manifest = DatasetManifest.load(dataset_manifest)
     train_script = (repo_root / args.train_script).resolve()
     presets = resolve_configs(args.configs)
+    durations = resolve_durations(args.durations)
     sweep_id = f"{manifest.dataset_id}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
 
     config_summaries: list[dict[str, Any]] = []
     for preset in presets:
-        runs = [
-            run_single_training(
-                repo_root=repo_root,
-                train_script=train_script,
-                workspace=workspace,
-                dataset_manifest=dataset_manifest,
-                preset=preset,
-                repeat_index=repeat_index,
-                sweep_id=sweep_id,
-                args=args,
-            )
-            for repeat_index in range(1, args.repeats + 1)
-        ]
-        config_summaries.append(summarize_config_runs(preset, runs))
+        for duration_seconds in durations:
+            runs = [
+                run_single_training(
+                    repo_root=repo_root,
+                    train_script=train_script,
+                    workspace=workspace,
+                    dataset_manifest=dataset_manifest,
+                    preset=preset,
+                    duration_seconds=duration_seconds,
+                    repeat_index=repeat_index,
+                    sweep_id=sweep_id,
+                    args=args,
+                )
+                for repeat_index in range(1, args.repeats + 1)
+            ]
+            config_summaries.append(summarize_config_runs(preset, duration_seconds, runs))
 
     ranking = [
         {
             "config_name": summary["config_name"],
+            "duration_seconds": summary["duration_seconds"],
             "mean_val_ler": summary["mean_val_ler"],
             "best_val_ler": summary["best_val_ler"],
             "mean_mwpm_ratio": summary["mean_mwpm_ratio"],
@@ -286,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         "dataset_manifest": str(dataset_manifest),
         "device": args.device,
         "base_train_seed": args.base_train_seed,
-        "duration_seconds": args.duration_seconds,
+        "duration_seconds_sweep": durations,
         "eval_interval_seconds": args.eval_interval_seconds,
         "repeats": args.repeats,
         "configs": config_summaries,

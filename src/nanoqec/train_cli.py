@@ -6,6 +6,7 @@ import argparse
 import copy
 import json
 import logging
+import math
 import shutil
 import time
 from datetime import UTC, datetime
@@ -52,6 +53,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--optimizer", choices=["adamw", "lion"], default="lion")
+    parser.add_argument("--scheduler", choices=["constant", "warmup_cosine"], default="constant")
+    parser.add_argument("--warmup-fraction", type=float, default=0.1)
+    parser.add_argument("--min-learning-rate-scale", type=float, default=0.1)
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--results-dir", type=Path, default=Path("results/train"))
@@ -126,6 +130,56 @@ def build_optimizer(
             weight_decay=weight_decay,
         )
     raise ValueError(f"unsupported optimizer: {optimizer_name}")
+
+
+def validate_scheduler_args(args: argparse.Namespace) -> None:
+    """Validate CLI scheduler controls."""
+
+    if args.warmup_fraction < 0.0 or args.warmup_fraction >= 1.0:
+        raise ValueError("--warmup-fraction must be in [0.0, 1.0)")
+    if args.min_learning_rate_scale < 0.0 or args.min_learning_rate_scale > 1.0:
+        raise ValueError("--min-learning-rate-scale must be in [0.0, 1.0]")
+
+
+def compute_learning_rate_scale(
+    elapsed_seconds: float,
+    duration_seconds: float,
+    scheduler_name: str,
+    warmup_fraction: float,
+    min_learning_rate_scale: float,
+) -> float:
+    """Compute the current learning-rate scale from the wall-clock schedule."""
+
+    if scheduler_name == "constant":
+        return 1.0
+    if scheduler_name != "warmup_cosine":
+        raise ValueError(f"unsupported scheduler: {scheduler_name}")
+    if duration_seconds <= 0.0:
+        return 1.0
+    progress = min(max(elapsed_seconds / duration_seconds, 0.0), 1.0)
+    if warmup_fraction > 0.0 and progress < warmup_fraction:
+        warmup_progress = progress / warmup_fraction
+        return max(1e-3, float(warmup_progress))
+    decay_progress = (
+        1.0
+        if warmup_fraction >= 1.0
+        else (progress - warmup_fraction) / max(1.0 - warmup_fraction, 1e-9)
+    )
+    cosine_scale = 0.5 * (1.0 + math.cos(math.pi * min(max(decay_progress, 0.0), 1.0)))
+    return float(min_learning_rate_scale + (1.0 - min_learning_rate_scale) * cosine_scale)
+
+
+def set_optimizer_learning_rate(
+    optimizer: torch.optim.Optimizer,
+    base_learning_rate: float,
+    scale: float,
+) -> float:
+    """Apply a scheduled learning rate to every optimizer parameter group."""
+
+    current_learning_rate = float(base_learning_rate * scale)
+    for group in optimizer.param_groups:
+        group["lr"] = current_learning_rate
+    return current_learning_rate
 
 
 def evaluate_binary_logits(logits: Tensor, labels: Tensor) -> tuple[float, float]:
@@ -347,6 +401,9 @@ def build_checkpoint_payload(
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
             "optimizer": args.optimizer,
+            "scheduler": args.scheduler,
+            "warmup_fraction": args.warmup_fraction,
+            "min_learning_rate_scale": args.min_learning_rate_scale,
             "device": str(device),
         },
         "dataset_id": manifest.dataset_id,
@@ -365,6 +422,7 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     workspace = args.workspace.resolve()
+    validate_scheduler_args(args)
     manifest_path = args.dataset_manifest.resolve()
     manifest = DatasetManifest.load(manifest_path)
     layout = LayoutSpec.from_manifest(manifest)
@@ -384,14 +442,27 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
     examples_seen = 0
     last_loss = 0.0
     last_eval_time = 0.0
+    current_learning_rate = args.learning_rate
     start_time = time.perf_counter()
     best_state_dict = copy.deepcopy(model.state_dict())
     best_selection_aggregate: dict[str, Any] | None = None
+    eval_history: list[dict[str, Any]] = []
 
     while True:
         elapsed = time.perf_counter() - start_time
         if steps > 0 and elapsed >= args.duration_seconds:
             break
+        current_learning_rate = set_optimizer_learning_rate(
+            optimizer,
+            args.learning_rate,
+            compute_learning_rate_scale(
+                elapsed_seconds=elapsed,
+                duration_seconds=args.duration_seconds,
+                scheduler_name=args.scheduler,
+                warmup_fraction=args.warmup_fraction,
+                min_learning_rate_scale=args.min_learning_rate_scale,
+            ),
+        )
         selected_slice = slice_arrays[int(rng.integers(0, len(slice_arrays)))]
         batch_x, batch_y = sample_train_batch(selected_slice, args.batch_size, rng, device)
         batch_p_error = build_p_error_batch(selected_slice.p_error, len(batch_x), device)
@@ -412,6 +483,17 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
                 slice_arrays,
                 device,
             )
+            eval_history.append(
+                {
+                    "elapsed_seconds": elapsed,
+                    "steps": steps,
+                    "examples_seen": examples_seen,
+                    "learning_rate": current_learning_rate,
+                    "aggregate_val_ler": aggregate["aggregate_val_ler"],
+                    "aggregate_mwpm_ratio": aggregate["aggregate_mwpm_ratio"],
+                    "aggregate_val_accuracy": aggregate["aggregate_val_accuracy"],
+                }
+            )
             if best_selection_aggregate is None or (
                 aggregate["aggregate_val_ler"] < best_selection_aggregate["aggregate_val_ler"]
             ):
@@ -423,6 +505,18 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
         model,
         slice_arrays,
         device,
+    )
+    final_elapsed = time.perf_counter() - start_time
+    eval_history.append(
+        {
+            "elapsed_seconds": final_elapsed,
+            "steps": steps,
+            "examples_seen": examples_seen,
+            "learning_rate": current_learning_rate,
+            "aggregate_val_ler": final_aggregate["aggregate_val_ler"],
+            "aggregate_mwpm_ratio": final_aggregate["aggregate_mwpm_ratio"],
+            "aggregate_val_accuracy": final_aggregate["aggregate_val_accuracy"],
+        }
     )
     if best_selection_aggregate is None or (
         final_aggregate["aggregate_val_ler"] < best_selection_aggregate["aggregate_val_ler"]
@@ -496,8 +590,12 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
         "throughput_samples_per_second": examples_seen / wall_time,
         "train_loss_last": last_loss,
         "optimizer": args.optimizer,
+        "scheduler": args.scheduler,
+        "warmup_fraction": args.warmup_fraction,
+        "min_learning_rate_scale": args.min_learning_rate_scale,
         "decision_threshold": best_decision_threshold,
         "parameter_count": parameter_count(model),
+        "eval_history": eval_history,
         **best_aggregate,
         "per_slice": best_per_slice,
         "kept": kept,
