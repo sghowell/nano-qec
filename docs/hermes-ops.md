@@ -71,6 +71,26 @@ Suggested first prompt:
 Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md, then summarize the NanoQEC operating rules before making any changes.
 ```
 
+Sample autoresearch kickoff prompts:
+
+```text
+Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md. Then run one bounded local-d3-v1 decoder-improvement experiment on a short-lived exp branch. Stay inside the protected harness contracts, use the existing prepare/train/eval entrypoints, and do not merge automatically. When done, report the hypothesis, exact code changes, aggregate val_ler, aggregate mwpm_ratio, and whether the branch should be kept or discarded.
+```
+
+```text
+Read the NanoQEC authority docs, inspect the most recent local-d3-v1 results, and propose the highest-signal next experiment to reduce aggregate mwpm_ratio. Before changing code, explain the hypothesis, the files you plan to edit, and the validation path you will run.
+```
+
+Sample recent-run query prompts:
+
+```text
+Read results/experiments.jsonl and summarize the 5 most recent runs. For each, report branch, hypothesis, aggregate val_ler, aggregate mwpm_ratio, kept/discarded, and the most important takeaway.
+```
+
+```text
+Inspect the latest training and evaluation artifacts for local-d3-v1 and tell me which physical-error-rate slices are currently weakest relative to MWPM. Use concrete numbers and suggest one targeted follow-up experiment.
+```
+
 Useful session helpers:
 
 ```bash
