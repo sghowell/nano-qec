@@ -10,6 +10,8 @@ This runbook defines how Hermes should operate inside the NanoQEC repository.
 - Hermes must use the repo-local docs as authority.
 - Hermes must run `uv` commands from the repo root.
 - Hermes must not rely on hidden state in `~/.hermes` to understand NanoQEC.
+- Hermes should treat `best.pt` and the aggregate profile metrics as the default
+  local comparison artifacts.
 
 ## Repo Discovery
 
@@ -45,9 +47,9 @@ Hermes should read these files before changing behavior:
 
 ```bash
 uv sync --all-extras
-uv run prepare.py --workspace .
-uv run train.py --workspace . --dataset-manifest data/local-d3-v0-d3-r3-p0p005/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v0-d3-r3-p0p005/manifest.json --checkpoint checkpoints/latest.pt
+uv run prepare.py --workspace . --profile local-d3-v1
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
 
 If any command, path, or schema deviates from this runbook, Hermes must update

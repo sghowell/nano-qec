@@ -212,6 +212,7 @@ name = "nanoqec"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pymatching" },
     { name = "stim" },
@@ -226,6 +227,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "matplotlib", specifier = ">=3.8,<4" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "pymatching", specifier = ">=2.2,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<9" },

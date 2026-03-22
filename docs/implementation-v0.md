@@ -1,47 +1,61 @@
-# NanoQEC V0 Implementation Spec
+# NanoQEC Local Implementation Spec
 
 ## Scope
 
-This document freezes the v0 implementation boundary for the local readiness
-harness.
+This document freezes the current local implementation boundary for NanoQEC.
 
 - Local single-host execution only
 - `surface_code:rotated_memory_x`
-- `distance=3`
-- `rounds=3`
+- supported profiles: `local-d3-v1`, `local-d5-v1`
 - one logical observable
-- `p_error=0.005`
-- deterministic cached validation data
+- profile-level multi-rate validation sweeps
+- deterministic cached training and validation data
 - `uv` as the only package and task runner
 
-Out of scope for v0:
+Out of scope for the current local phase:
 
-- `d=5`
-- mixed-distance batches
+- mixed-distance training in a single run
 - Prime Intellect integration
 - cron or overnight scheduling
 - automatic promotion to `main`
 
+## Profiles
+
+### `local-d3-v1`
+
+- distance: `3`
+- rounds: `3`
+- physical error rates: `0.001`, `0.003`, `0.005`, `0.007`, `0.01`
+- default train shots per slice: `1024`
+- default val shots per slice: `256`
+
+### `local-d5-v1`
+
+- distance: `5`
+- rounds: `5`
+- physical error rates: `0.001`, `0.003`, `0.005`, `0.007`, `0.01`
+- default train shots per slice: `512`
+- default val shots per slice: `256`
+
 ## Canonical Data Representation
 
-The canonical stored representation is flat detector ordering plus coordinate
-metadata from Stim.
+The canonical stored representation remains flat detector ordering plus
+coordinate metadata from Stim. Each prepared profile stores a single shared
+layout description plus per-error-rate slice artifacts.
 
-Observed reference layout for `distance=3`, `rounds=3`:
+Observed reference layout shapes:
 
-- detector count: `24`
-- observable count: `1`
-- time coordinates: `0.0`, `1.0`, `2.0`, `3.0`
-- detector counts per time coordinate: `4`, `8`, `8`, `4`
+- `d=3`, `rounds=3`: detector count `24`, time bucket sizes `[4, 8, 8, 4]`
+- `d=5`, `rounds=5`: detector count `120`, time bucket sizes `[12, 24, 24, 24, 24, 12]`
 
-The public dataset contract stores flat detector events and the detector
-coordinates needed to derive time-grouped views internally. The baseline AQ2
-model may build a padded time-bucket tensor internally, but that transformation
-is not part of the public dataset artifact schema.
+The public dataset artifact schema stores the flat events plus metadata needed
+to derive detector-aware time buckets internally. The AQ2 baseline consumes a
+padded time-bucket view built from that metadata, but that transformation is
+internal to the model stack.
 
 ## Reproducibility Rules
 
-- Validation caches are fixed for a dataset id and seed.
+- Validation caches are fixed for a dataset id and slice seed.
 - Training uses a separate training seed from data generation.
 - Time budgets apply to training only and exclude cache generation.
 - The same dataset manifest must identify the same artifact paths and metadata
@@ -51,37 +65,28 @@ is not part of the public dataset artifact schema.
 
 ### `prepare.py`
 
-Materializes deterministic train/validation caches plus a manifest.
+Materializes deterministic multi-slice train/validation caches plus a manifest.
 
 Required behavior:
 
-- create `data/<dataset_id>/train.npz`
-- create `data/<dataset_id>/val.npz`
 - create `data/<dataset_id>/manifest.json`
-- populate MWPM validation baseline in the manifest
+- create `train_<slice_id>.npz` and `val_<slice_id>.npz` per physical error rate
+- populate MWPM validation baselines per slice and an aggregate baseline mean
 - print a JSON summary to stdout
 - exit non-zero on invalid config or schema failure
 
-Default contract:
-
-- profile: `local-d3-v0`
-- distance: `3`
-- rounds: `3`
-- physical error rate: `0.005`
-- train seed: `20260321`
-- val seed: `20260322`
-
 ### `train.py`
 
-Consumes a dataset manifest and produces a checkpoint, metrics JSON, and one
+Consumes a dataset manifest and produces checkpoints, metrics JSON, and one
 machine-parseable `RESULT` line.
 
 Required behavior:
 
-- load the dataset manifest
-- train a baseline minimal AQ2-style model by default
+- load all slices from the dataset manifest
+- train a stronger minimal AQ2-style model by default
 - support at least one alternate model implementation to prove architecture
   replaceability
+- periodically evaluate across all validation slices and save `best.pt`
 - write checkpoint metadata sufficient for `eval.py` to reconstruct the model
 - optionally append a runtime record to `results/experiments.jsonl`
 - exit non-zero on contract violations or training failure
@@ -92,17 +97,21 @@ Required behavior:
 RESULT {"run_id":"...","val_ler":0.123,"mwpm_ratio":1.1,"kept":false}
 ```
 
+The primary `val_ler` in the `RESULT` line is the aggregate mean validation LER
+across all slices in the manifest profile.
+
 ### `eval.py`
 
-Consumes a dataset manifest and checkpoint, then emits structured evaluation
-metrics.
+Consumes a dataset manifest and checkpoint, then emits structured profile
+evaluation metrics.
 
 Required behavior:
 
 - rebuild the model from checkpoint metadata, not hard-coded class assumptions
-- compute validation LER
-- report cached MWPM comparison
+- compute aggregate and per-slice validation LER
+- report per-slice MWPM comparisons
 - write a JSON results file
+- optionally write an `LER vs p` plot when plotting support is available
 - print a JSON summary to stdout
 - exit non-zero on missing or invalid artifacts
 
@@ -118,12 +127,12 @@ Required fields:
 - `circuit_name`
 - `distance`
 - `rounds`
-- `p_error`
 - `detector_count`
 - `observable_count`
 - `representation`
-- `splits`
-- `baselines`
+- `p_error_values`
+- `slices`
+- `aggregate_baselines`
 
 ### Checkpoint Metadata
 
@@ -144,6 +153,7 @@ Required fields:
 - `schema_version`
 - `run_id`
 - `dataset_id`
+- `profile`
 - `hypothesis`
 - `branch_name`
 - `git_sha`
@@ -157,7 +167,7 @@ Required fields:
 
 ## Promotion Rule
 
-In v0, runtime experiment records may be appended automatically, but no branch
-may be promoted automatically. `kept` means the run beat the best previously
-recorded `val_ler` for the same dataset/evaluation profile; it does not grant
-merge permission by itself.
+The current local phase may append runtime experiment records automatically, but
+no branch may be promoted automatically. `kept` means the run beat the best
+previous aggregate validation LER for the same dataset profile; it does not
+grant merge permission by itself.

@@ -22,9 +22,10 @@ merging.
 - Hermes is the primary operator for experiment execution.
 - The repository is the source of truth for behavior, contracts, and guardrails.
 - `SKILL.md` and `program.md` are adapters that point back to this repository.
-- The first implementation target is local-only `d=3` using `uv`.
-- Cloud GPUs, mixed-distance training, `d=5`, cron scheduling, and autonomous
-  promotion are deferred until the local harness is stable.
+- The current implementation target is local-only profile training using `uv`.
+- Supported research profiles are `local-d3-v1` and `local-d5-v1`.
+- Cloud GPUs, mixed-distance training, cron scheduling, and autonomous
+  promotion remain deferred until the local harness is stable.
 
 ## Protected Boundaries
 
