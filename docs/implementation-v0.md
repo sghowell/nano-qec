@@ -51,7 +51,9 @@ Observed reference layout shapes:
 The public dataset artifact schema stores the flat events plus metadata needed
 to derive detector-aware time buckets internally. The AQ2 baseline consumes a
 padded time-bucket view built from that metadata, but that transformation is
-internal to the model stack.
+internal to the model stack. The current default decoder also conditions on the
+profile physical error rate internally and applies a learned global decision
+threshold after training.
 
 ## Reproducibility Rules
 
@@ -87,6 +89,8 @@ Required behavior:
 - support at least one alternate model implementation to prove architecture
   replaceability
 - periodically evaluate across all validation slices and save `best.pt`
+- calibrate a global decision threshold on the training split before writing
+  final metrics and checkpoints
 - write checkpoint metadata sufficient for `eval.py` to reconstruct the model
 - optionally append a runtime record to `results/experiments.jsonl`
 - exit non-zero on contract violations or training failure
@@ -108,6 +112,7 @@ evaluation metrics.
 Required behavior:
 
 - rebuild the model from checkpoint metadata, not hard-coded class assumptions
+- use the checkpoint decision threshold when present
 - compute aggregate and per-slice validation LER
 - report per-slice MWPM comparisons
 - write a JSON results file
@@ -145,6 +150,10 @@ Required fields:
 - `dataset_id`
 - `train_seed`
 - `git_sha`
+
+Current checkpoints should also include `decision_threshold`. `eval.py`
+defaults to `0.5` when loading older local checkpoints that predate threshold
+calibration.
 
 ### Runtime Experiment Record
 
