@@ -59,6 +59,26 @@ Recommended preflight:
 hermes status
 ```
 
+Direct interactive use from the repo root:
+
+```bash
+hermes chat
+```
+
+Suggested first prompt:
+
+```text
+Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md, then summarize the NanoQEC operating rules before making any changes.
+```
+
+Useful session helpers:
+
+```bash
+hermes -c
+hermes sessions browse
+hermes chat --worktree
+```
+
 If the configured provider is healthy, a minimal repo-root one-shot should be
 able to read the authoritative docs:
 

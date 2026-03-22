@@ -22,6 +22,60 @@ uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-t
 uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
 
+## Using Hermes Directly
+
+Run Hermes from the repo root so it can see the NanoQEC authority docs and
+artifacts.
+
+Preflight:
+
+```bash
+hermes model
+hermes status
+```
+
+Interactive CLI/TUI session:
+
+```bash
+hermes chat
+```
+
+Suggested first prompt:
+
+```text
+Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md, then summarize the current NanoQEC operating rules before making any changes.
+```
+
+One-shot repo-root query:
+
+```bash
+hermes chat -Q -q "Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md from the current repo, then reply with a one-line readiness summary."
+```
+
+Resume a previous session:
+
+```bash
+hermes -c
+hermes sessions browse
+```
+
+Run Hermes in an isolated git worktree:
+
+```bash
+hermes chat --worktree
+```
+
+Documented NanoQEC dry-run:
+
+```bash
+uv sync --all-extras
+uv run prepare.py --workspace . --profile local-d3-v1
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint checkpoints/best.pt
+```
+
+See `docs/hermes-ops.md` for the full repo mutation policy and dry-run workflow.
+
 ## Validation
 
 ```bash
