@@ -7,10 +7,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-DATASET_SCHEMA_VERSION = "nanoqec.dataset.v1"
-CHECKPOINT_SCHEMA_VERSION = "nanoqec.checkpoint.v1"
-METRICS_SCHEMA_VERSION = "nanoqec.metrics.v1"
-EXPERIMENT_SCHEMA_VERSION = "nanoqec.experiment.v1"
+DATASET_SCHEMA_VERSION = "nanoqec.dataset.v2"
+LEGACY_DATASET_SCHEMA_VERSION = "nanoqec.dataset.v1"
+CHECKPOINT_SCHEMA_VERSION = "nanoqec.checkpoint.v2"
+LEGACY_CHECKPOINT_SCHEMA_VERSION = "nanoqec.checkpoint.v1"
+METRICS_SCHEMA_VERSION = "nanoqec.metrics.v2"
+EXPERIMENT_SCHEMA_VERSION = "nanoqec.experiment.v2"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -29,7 +31,7 @@ def _ensure_keys(name: str, payload: dict[str, Any], required_keys: set[str]) ->
 
 
 @dataclass(slots=True)
-class DatasetSplit:
+class DatasetArtifact:
     """Dataset split artifact metadata."""
 
     path: str
@@ -37,12 +39,34 @@ class DatasetSplit:
     seed: int
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DatasetSplit:
-        _ensure_keys("dataset split", payload, {"path", "shots", "seed"})
+    def from_dict(cls, payload: dict[str, Any]) -> DatasetArtifact:
+        _ensure_keys("dataset artifact", payload, {"path", "shots", "seed"})
         return cls(
             path=str(payload["path"]),
             shots=int(payload["shots"]),
             seed=int(payload["seed"]),
+        )
+
+
+@dataclass(slots=True)
+class DatasetSlice:
+    """One physical-error slice within a prepared research profile."""
+
+    slice_id: str
+    p_error: float
+    train: DatasetArtifact
+    val: DatasetArtifact
+    baselines: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> DatasetSlice:
+        _ensure_keys("dataset slice", payload, {"slice_id", "p_error", "train", "val", "baselines"})
+        return cls(
+            slice_id=str(payload["slice_id"]),
+            p_error=float(payload["p_error"]),
+            train=DatasetArtifact.from_dict(dict(payload["train"])),
+            val=DatasetArtifact.from_dict(dict(payload["val"])),
+            baselines=dict(payload["baselines"]),
         )
 
 
@@ -56,16 +80,23 @@ class DatasetManifest:
     circuit_name: str
     distance: int
     rounds: int
-    p_error: float
     detector_count: int
     observable_count: int
     representation: dict[str, Any]
-    splits: dict[str, DatasetSplit]
-    baselines: dict[str, Any]
+    p_error_values: list[float]
+    slices: list[DatasetSlice]
+    aggregate_baselines: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
-        payload["splits"] = {name: asdict(split) for name, split in self.splits.items()}
+        payload["slices"] = [
+            {
+                **asdict(dataset_slice),
+                "train": asdict(dataset_slice.train),
+                "val": asdict(dataset_slice.val),
+            }
+            for dataset_slice in self.slices
+        ]
         return payload
 
     def write(self, path: Path) -> None:
@@ -74,6 +105,9 @@ class DatasetManifest:
     @classmethod
     def load(cls, path: Path) -> DatasetManifest:
         payload = _load_json(path)
+        schema_version = str(payload.get("schema_version"))
+        if schema_version == LEGACY_DATASET_SCHEMA_VERSION:
+            return cls._from_legacy_v1(payload)
         required_keys = {
             "schema_version",
             "dataset_id",
@@ -81,18 +115,14 @@ class DatasetManifest:
             "circuit_name",
             "distance",
             "rounds",
-            "p_error",
             "detector_count",
             "observable_count",
             "representation",
-            "splits",
-            "baselines",
+            "p_error_values",
+            "slices",
+            "aggregate_baselines",
         }
         _ensure_keys("dataset manifest", payload, required_keys)
-        splits = {
-            split_name: DatasetSplit.from_dict(split_payload)
-            for split_name, split_payload in payload["splits"].items()
-        }
         manifest = cls(
             schema_version=str(payload["schema_version"]),
             dataset_id=str(payload["dataset_id"]),
@@ -100,22 +130,73 @@ class DatasetManifest:
             circuit_name=str(payload["circuit_name"]),
             distance=int(payload["distance"]),
             rounds=int(payload["rounds"]),
-            p_error=float(payload["p_error"]),
             detector_count=int(payload["detector_count"]),
             observable_count=int(payload["observable_count"]),
             representation=dict(payload["representation"]),
-            splits=splits,
-            baselines=dict(payload["baselines"]),
+            p_error_values=[float(value) for value in payload["p_error_values"]],
+            slices=[
+                DatasetSlice.from_dict(dict(slice_payload))
+                for slice_payload in payload["slices"]
+            ],
+            aggregate_baselines=dict(payload["aggregate_baselines"]),
         )
         if manifest.schema_version != DATASET_SCHEMA_VERSION:
-            raise ValueError(
-                f"unsupported dataset manifest schema: {manifest.schema_version}"
-            )
+            raise ValueError(f"unsupported dataset manifest schema: {manifest.schema_version}")
         return manifest
 
-    def split_path(self, manifest_path: Path, split_name: str) -> Path:
-        split = self.splits[split_name]
-        return manifest_path.parent / split.path
+    @classmethod
+    def _from_legacy_v1(cls, payload: dict[str, Any]) -> DatasetManifest:
+        _ensure_keys(
+            "legacy dataset manifest",
+            payload,
+            {
+                "schema_version",
+                "dataset_id",
+                "profile",
+                "circuit_name",
+                "distance",
+                "rounds",
+                "p_error",
+                "detector_count",
+                "observable_count",
+                "representation",
+                "splits",
+                "baselines",
+            },
+        )
+        splits = dict(payload["splits"])
+        dataset_slice = DatasetSlice(
+            slice_id="legacy-default",
+            p_error=float(payload["p_error"]),
+            train=DatasetArtifact.from_dict(dict(splits["train"])),
+            val=DatasetArtifact.from_dict(dict(splits["val"])),
+            baselines=dict(payload["baselines"]),
+        )
+        return cls(
+            schema_version=DATASET_SCHEMA_VERSION,
+            dataset_id=str(payload["dataset_id"]),
+            profile=str(payload["profile"]),
+            circuit_name=str(payload["circuit_name"]),
+            distance=int(payload["distance"]),
+            rounds=int(payload["rounds"]),
+            detector_count=int(payload["detector_count"]),
+            observable_count=int(payload["observable_count"]),
+            representation=dict(payload["representation"]),
+            p_error_values=[float(payload["p_error"])],
+            slices=[dataset_slice],
+            aggregate_baselines=dict(payload["baselines"]),
+        )
+
+    def slice_by_id(self, slice_id: str) -> DatasetSlice:
+        for dataset_slice in self.slices:
+            if dataset_slice.slice_id == slice_id:
+                return dataset_slice
+        raise KeyError(f"unknown dataset slice: {slice_id}")
+
+    def split_path(self, manifest_path: Path, slice_id: str, split_name: str) -> Path:
+        dataset_slice = self.slice_by_id(slice_id)
+        artifact = dataset_slice.train if split_name == "train" else dataset_slice.val
+        return manifest_path.parent / artifact.path
 
 
 def write_metrics(path: Path, payload: dict[str, Any]) -> None:
@@ -140,7 +221,10 @@ def load_checkpoint_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "git_sha",
     }
     _ensure_keys("checkpoint metadata", payload, required_keys)
-    if payload["schema_version"] != CHECKPOINT_SCHEMA_VERSION:
+    if payload["schema_version"] not in {
+        LEGACY_CHECKPOINT_SCHEMA_VERSION,
+        CHECKPOINT_SCHEMA_VERSION,
+    }:
         raise ValueError(f"unexpected checkpoint schema: {payload['schema_version']}")
     return payload
 
