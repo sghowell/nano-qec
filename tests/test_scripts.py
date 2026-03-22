@@ -7,6 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nanoqec.prepare_cli import parse_args as parse_prepare_args
+from nanoqec.prepare_cli import run_prepare
+
 
 def run_script(script_path: Path, *args: str) -> dict[str, object]:
     """Execute a repo script with the current interpreter and parse JSON stdout."""
@@ -18,6 +21,25 @@ def run_script(script_path: Path, *args: str) -> dict[str, object]:
         text=True,
     )
     return json.loads(completed.stdout.strip())
+
+
+def build_dataset(tmp_path: Path) -> Path:
+    """Prepare one tiny deterministic profile for script tests."""
+
+    prepare_args = parse_prepare_args(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--profile",
+            "local-d3-v1",
+            "--train-shots",
+            "32",
+            "--val-shots",
+            "16",
+        ]
+    )
+    summary = run_prepare(prepare_args)
+    return Path(summary["manifest_path"])
 
 
 def test_scripts_operate_on_runtime_artifacts(tmp_path: Path) -> None:
@@ -71,3 +93,32 @@ def test_scripts_operate_on_runtime_artifacts(tmp_path: Path) -> None:
     )
     assert plot_output["points"] == 2
     assert output_path.exists()
+
+
+def test_tuning_script_runs_one_repeat(tmp_path: Path) -> None:
+    manifest_path = build_dataset(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    tuning_output = run_script(
+        repo_root / "scripts" / "tune_profile.py",
+        "--workspace",
+        str(tmp_path),
+        "--dataset-manifest",
+        str(manifest_path),
+        "--config",
+        "baseline",
+        "--repeats",
+        "1",
+        "--duration-seconds",
+        "0.2",
+        "--eval-interval-seconds",
+        "0.1",
+        "--device",
+        "cpu",
+    )
+    summary_path = Path(str(tuning_output["summary_path"]))
+    assert summary_path.exists()
+    summary_payload = json.loads(summary_path.read_text())
+    assert summary_payload["schema_version"] == "nanoqec.tuning.v1"
+    assert summary_payload["configs"][0]["config_name"] == "baseline"
+    assert summary_payload["configs"][0]["repeat_count"] == 1
+    assert len(summary_payload["configs"][0]["runs"]) == 1

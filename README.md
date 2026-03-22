@@ -33,4 +33,5 @@ uv run pytest
 ```bash
 uv run python scripts/check_improvement.py --metrics-json results/train/<run>.json
 uv run python scripts/plot_progress.py --experiment-log results/experiments.jsonl --output results/progress.png
+uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --config baseline --config lr1e3 --repeats 3 --duration-seconds 30 --eval-interval-seconds 5
 ```
