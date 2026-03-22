@@ -13,6 +13,14 @@ This runbook defines how Hermes should operate inside the NanoQEC repository.
 - Hermes should treat `best.pt` and the aggregate profile metrics as the default
   local comparison artifacts.
 
+Before attempting a repo dry-run, Hermes itself must be ready:
+
+- `hermes status` must show at least one working inference path.
+- If the default provider is not logged in, fix it with `hermes model` before
+  trying repo work.
+- If a one-shot `hermes chat` call fails with a provider or model `400` error,
+  treat that as a Hermes runtime/config issue, not a NanoQEC repo issue.
+
 ## Repo Discovery
 
 Hermes should read these files before changing behavior:
@@ -44,6 +52,21 @@ Hermes should read these files before changing behavior:
 - run the documented validation commands before proposing a merge
 
 ## Dry-Run Workflow
+
+Recommended preflight:
+
+```bash
+hermes status
+```
+
+If the configured provider is healthy, a minimal repo-root one-shot should be
+able to read the authoritative docs:
+
+```bash
+hermes chat -Q -q "Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md from the current repo, then reply with a one-line readiness summary."
+```
+
+Then the repo dry-run itself is:
 
 ```bash
 uv sync --all-extras
