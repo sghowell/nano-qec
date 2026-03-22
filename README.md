@@ -11,6 +11,7 @@ contracts, schemas, validation, and operating rules.
   contracts.
 - `docs/hermes-ops.md`: Hermes runbook and mutation policy.
 - `docs/nanoqec-plan.md`: long-horizon architecture and research strategy.
+- `archived/`: historical reference files that may lag the implementation.
 
 ## Quickstart
 

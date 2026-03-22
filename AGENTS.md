@@ -13,6 +13,7 @@ external memory or hidden instructions.
 3. `docs/hermes-ops.md`.
 4. Code, tests, and schema validators.
 5. `docs/nanoqec-plan.md` for long-term strategy only.
+6. `archived/` contents for historical reference only; they are not authoritative.
 
 If any of these drift, update the repo docs and code in the same branch before
 merging.

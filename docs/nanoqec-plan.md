@@ -7,11 +7,24 @@
 
 ## 0. Executive Summary
 
-NanoQEC adapts the autoresearch pattern (Karpathy, 2026) to neural decoding for quantum error correction. An autonomous agent (Hermes Agent, Nous Research) iteratively modifies a minimal AlphaQubit 2-style recurrent-transformer decoder, trains it on Stim-generated surface code syndrome data under a fixed time budget, evaluates against a held-out validation set, and keeps or discards each change based on logical error rate improvement. The entire stack is open source, runs on a single GPU (M4 Pro MPS or a Prime Intellect cloud A100/H100), and produces a research log of experiments while you sleep.
+NanoQEC adapts the autoresearch pattern (Karpathy, 2026) to neural decoding for quantum error correction, but the implemented repository now does so as a harness-first local research stack. Repo-local docs, schemas, tests, and entrypoints are authoritative. Hermes is intended to be the primary operator inside that harness, not the source of truth for it. The current implemented target is a local single-host workflow using `uv`, deterministic profile preparation, a minimal AlphaQubit 2-style recurrent-transformer baseline, structured evaluation against MWPM, and machine-readable experiment logging.
 
-The decoder architecture is a deliberately simplified AQ2: interleaved lightweight gated-recurrence layers and spatial transformer layers operating on per-stabilizer representations, with temporal compression of syndrome frames and mean-pooled readout. Training data is generated on-the-fly from Stim's `surface_code:rotated_memory_x` circuits with depolarizing noise. PyMatching provides the MWPM baseline. PyTorch is the training framework, with MPS backend for Apple Silicon and CUDA for cloud GPUs.
+The current decoder family is a deliberately simplified AQ2: detector-aware embeddings, interleaved gated temporal blocks and spatial transformer layers, temporal compression of syndrome frames, profile-aware conditioning, and calibrated logical readout. Training data is generated from Stim's `surface_code:rotated_memory_x` circuits with depolarizing noise. PyMatching provides the MWPM baseline. PyTorch is the training framework. The present research focus is to improve decoder quality on the local `d=3` and `d=5` profiles before expanding to mixed-distance training or cloud execution.
 
-Hermes Agent drives the autonomous research loop via a custom `nanoqec` skill, replacing the `program.md` pattern from autoresearch with a richer skill document that includes syndrome-generation scripts, evaluation harness, and experiment logging. Hermes's persistent memory accumulates knowledge across experiment runs, and its cron scheduler enables overnight autonomous operation.
+Hermes integration is now repo-local and adapter-based. `AGENTS.md`, `docs/implementation-v0.md`, and `docs/hermes-ops.md` are the operating authority. `SKILL.md` and `program.md` are thin pointers back to those docs. Automatic promotion, cron scheduling, Prime Intellect/cloud execution, and overnight autonomy remain future phases that are intentionally deferred until the local harness is stronger and Hermes runtime configuration is proven healthy.
+
+### 0.1 Current Status Note
+
+As of March 2026, the repository already includes:
+
+- a `uv`-managed local package scaffold
+- deterministic `local-d3-v1` and `local-d5-v1` profile preparation
+- public `prepare.py`, `train.py`, and `eval.py` entrypoints
+- a minimal AQ2-style baseline plus an alternate model path
+- aggregate and per-slice evaluation, MWPM comparisons, and runtime experiment logs in `results/experiments.jsonl`
+- repeated tuning utilities and CI
+
+This document remains the long-horizon strategy and architecture note. For current operational behavior, follow `AGENTS.md`, `docs/implementation-v0.md`, and `docs/hermes-ops.md`.
 
 ---
 
@@ -19,56 +32,61 @@ Hermes Agent drives the autonomous research loop via a custom `nanoqec` skill, r
 
 ### 1.1 Information Flow
 
-The system has four major subsystems connected by a simple data flow:
+The current system centers on repo-local authority docs, a human or Hermes
+operator, stable public entrypoints, and runtime artifacts. Cloud and scheduler
+layers remain optional future extensions.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      HERMES AGENT                               │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
-│  │ Skill:   │  │ Memory   │  │ Cron     │  │ Experiment│       │
-│  │ nanoqec  │  │ (FTS5)   │  │ Scheduler│  │ Log (JSON)│       │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
-│       │              │             │              │              │
-│       └──────────────┴─────────────┴──────────────┘              │
-│                          │                                       │
-└──────────────────────────┼───────────────────────────────────────┘
+│                   REPO-LOCAL AUTHORITY                          │
+│  AGENTS.md | implementation-v0.md | hermes-ops.md | tests/CI   │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                HERMES OR HUMAN OPERATOR                         │
+│   SKILL.md and program.md are thin adapters into the repo docs  │
+└──────────────────────────┬──────────────────────────────────────┘
                            │
               ┌────────────┼────────────┐
               ▼            ▼            ▼
      ┌──────────────┐ ┌────────┐ ┌──────────┐
-     │  prepare.py   │ │train.py│ │ eval.py  │
-     │ (Stim data)   │ │(model) │ │(metrics) │
+     │  prepare.py  │ │train.py│ │ eval.py  │
+     │ (data/cache) │ │(model) │ │(metrics) │
      └───────┬──────┘ └───┬────┘ └────┬─────┘
              │             │           │
-             ▼             ▼           ▼
-     ┌──────────────────────────────────────┐
-     │        PyTorch Runtime               │
-     │   MPS (Apple Silicon) │ CUDA (Cloud) │
-     └──────────────────────────────────────┘
+             └─────────────┴───────────┘
+                           │
+                           ▼
+     ┌──────────────────────────────────────────────────────────┐
+     │   data/ | checkpoints/ | results/experiments.jsonl      │
+     │   PyTorch runtime on CPU/MPS today, cloud later         │
+     └──────────────────────────────────────────────────────────┘
 ```
 
 ### 1.2 Autoresearch Loop
 
 Each experiment cycle follows this sequence:
 
-1. **Hermes reads `train.py`** and proposes a modification (architecture, hyperparameters, optimizer, data augmentation, etc.)
-2. **Hermes creates a git branch** and applies the diff
-3. **`prepare.py`** generates fresh training and validation syndrome data from Stim (or loads cached data)
-4. **`train.py`** trains the decoder for a fixed wall-clock time budget (configurable, default 5 minutes)
-5. **`eval.py`** evaluates logical error rate (LER) on validation data across multiple physical error rates and distances
-6. **Hermes compares** val_ler against the current best; if improved, the change is merged to `main`
-7. **Hermes logs** the experiment (hypothesis, diff, metrics, outcome) to `experiments.jsonl`
+1. **Hermes or a human reads the repo-local authority docs** (`AGENTS.md`, `docs/implementation-v0.md`, `docs/hermes-ops.md`) and proposes a bounded change inside the mutable model/training surface.
+2. **A short-lived git branch is created** and the diff is applied.
+3. **`prepare.py`** loads or materializes deterministic profile data from Stim.
+4. **`train.py`** trains the decoder for a fixed wall-clock time budget and emits a structured `RESULT` line.
+5. **`eval.py`** evaluates aggregate and per-slice logical error rate (LER) against the fixed validation profile and MWPM baseline.
+6. **The run is marked keep or discard** and a runtime record may be appended to `results/experiments.jsonl`.
+7. **If a change is promoted**, it is validated, merged locally, revalidated on `main`, and then pushed. Auto-merge remains disabled in v0.
 8. **Repeat**
 
 ### 1.3 Separation of Concerns
 
 | File | Owner | Role |
 |------|-------|------|
-| `prepare.py` | Human (fixed) | Stim circuit generation, data loading, evaluation utilities |
-| `train.py` | Agent (modified) | Model architecture, optimizer, training loop, hyperparameters |
-| `eval.py` | Human (fixed) | Evaluation harness, metric computation, baseline comparison |
-| `program.md` | Human (iterated) | Autoresearch instructions for the agent |
-| `SKILL.md` | Human (iterated) | Hermes Agent skill for the nanoqec research loop |
+| `prepare.py` | Protected harness entrypoint | Deterministic data preparation and manifest generation |
+| `train.py` | Stable public entrypoint | Training CLI that delegates to mutable internals under `src/nanoqec/` |
+| `eval.py` | Protected harness entrypoint | Evaluation harness, metric computation, and MWPM comparison |
+| `src/nanoqec/` | Mutable implementation surface | Model architecture, optimizer, training loop, layouts, and internal loaders |
+| `AGENTS.md` + `docs/` | Human-maintained authority | Repo-local operating contracts, schemas, and mutation rules |
+| `program.md` + `SKILL.md` | Thin adapters | Pointers back to the repo-local authority docs |
 
 ---
 
@@ -241,7 +259,7 @@ D_MODEL = 64
 N_BLOCKS = 2
 LR = 3e-4
 BATCH_SIZE = 256
-OPTIMIZER = "adamw"
+OPTIMIZER = "lion"
 # ... (full model definition)
 # ===== AGENT MODIFIES ABOVE =====
 
@@ -262,25 +280,30 @@ while time.time() - start_time < TIME_BUDGET_SECONDS:
         log_metrics(step, loss, val_ler)
         next_eval_time += EVAL_INTERVAL
 
-# Final evaluation
-final_val_ler = evaluate(model, val_data)
-print(f"RESULT val_ler={final_val_ler:.6f}")
+# Final evaluation and threshold calibration
+decision_threshold = calibrate_threshold(model, train_data)
+final_val_ler = evaluate(model, val_data, threshold=decision_threshold)
+print(
+    'RESULT {"run_id":"...","val_ler":%.6f,"mwpm_ratio":1.0,"kept":false}'
+    % final_val_ler
+)
 ```
 
 ### 4.3 Evaluation Metric
 
-The primary metric is **validation logical error rate (val_ler)** — the fraction of validation syndrome samples where the decoder incorrectly predicts the logical observable. Lower is better. This is computed as:
+The primary metric is **aggregate validation logical error rate (val_ler)** — the mean of the validation logical error rate across all slices in the prepared profile manifest. Lower is better. For each slice, LER is computed as:
 
 ```
 val_ler = (1/N) * sum(I[decoder_prediction != true_observable])
 ```
 
-where the decoder's sigmoid output is thresholded at 0.5.
+where the decoder's sigmoid output is thresholded using the calibrated global
+decision threshold stored in the checkpoint. If no threshold metadata is
+available, the fallback threshold is 0.5.
 
 Secondary metrics (logged but not used for keep/discard):
-- val_ler per distance (d=3, d=5 separately)
-- val_ler per physical error rate
-- Comparison ratio: val_ler / mwpm_ler (< 1.0 means beating MWPM)
+- val_ler per physical error rate slice
+- Comparison ratio: aggregate val_ler / aggregate mwpm_ler (< 1.0 means beating MWPM)
 - Training throughput (samples/second)
 - Parameter count
 
@@ -290,141 +313,54 @@ Secondary metrics (logged but not used for keep/discard):
 
 ### 5.1 Integration Architecture
 
-Hermes Agent drives NanoQEC through three integration points:
+Hermes now integrates with NanoQEC through three repo-local layers:
 
-1. **Skill**: A `nanoqec` skill in `~/.hermes/skills/research/nanoqec/` provides the agent with domain knowledge about QEC, the AQ2 architecture, and the experiment protocol
-2. **Terminal backend**: Hermes executes `train.py` and `eval.py` via its terminal tool (local, Docker, or SSH to a Prime Intellect pod)
-3. **Cron scheduling**: Hermes runs experiments autonomously overnight via its built-in scheduler
+1. **Authority docs**: `AGENTS.md`, `docs/implementation-v0.md`, and `docs/hermes-ops.md` define the contracts, protected boundaries, and workflow.
+2. **Thin adapters**: `SKILL.md` and `program.md` point Hermes back to the repo-local instructions instead of carrying an independent protocol.
+3. **Stable entrypoints**: Hermes operates through `uv` and the public `prepare.py`, `train.py`, and `eval.py` commands plus machine-readable artifacts.
 
-### 5.2 Skill Structure
+Local single-host execution is the implemented mode today. Cron scheduling, overnight autonomy, and cloud backends remain deferred future phases.
 
-```
-~/.hermes/skills/research/nanoqec/
-├── SKILL.md                    # Main instructions (the "program.md" equivalent)
-├── references/
-│   ├── ARCHITECTURE.md         # AQ2 architecture details and design rationale
-│   ├── QEC_PRIMER.md           # Surface code and decoding background
-│   └── EXPERIMENT_PROTOCOL.md  # Step-by-step experiment execution guide
-├── scripts/
-│   ├── check_improvement.py    # Compare new results against current best
-│   └── plot_progress.py        # Generate progress charts
-└── assets/
-    └── baseline_results.json   # Pre-computed MWPM baselines for comparison
-```
-
-### 5.3 SKILL.md Content
-
-```yaml
----
-name: nanoqec
-description: >
-  Autonomous neural QEC decoder research. Run experiments that modify
-  train.py in a NanoQEC repo, train a minimal AlphaQubit 2-style decoder
-  on Stim-generated surface code syndrome data, and evaluate logical error
-  rate improvement. Use when the user mentions nanoqec, QEC experiments,
-  decoder training, or autonomous research on quantum error correction.
-version: 1.0.0
-author: zetetic-works
-license: Apache-2.0
-platforms: [macos, linux]
-metadata:
-  hermes:
-    tags: [research, quantum, ml, autonomous]
-    category: research
-    requires_toolsets: [terminal]
----
-
-# NanoQEC: Autonomous Neural QEC Decoder Research
-
-## When to Use
-- User says "run a nanoqec experiment" or "start autonomous QEC research"
-- User asks to improve the decoder or try a new architecture idea
-- Scheduled cron job triggers an experiment batch
-
-## Experiment Protocol
-
-### Setup (first run only)
-1. cd to the nanoqec repo directory
-2. Run `uv sync` to install dependencies
-3. Run `uv run prepare.py` to generate initial data caches
-4. Run `uv run train.py` to verify baseline training works
-5. Run `uv run eval.py` to compute MWPM baselines
-
-### Each Experiment
-1. Read `train.py` and `experiments.jsonl` to understand current state
-2. Formulate a hypothesis (e.g., "increasing d_model from 64 to 96
-   should improve capacity for d=5 decoding")
-3. Create a git branch: `git checkout -b exp-{NNN}-{short-description}`
-4. Modify ONLY `train.py` — do not touch prepare.py or eval.py
-5. Run: `uv run train.py 2>&1 | tee /tmp/train_output.txt`
-6. Parse the final RESULT line for val_ler
-7. Compare against current best in experiments.jsonl
-8. If improved: merge to main, update best
-9. If not improved: record result, discard branch
-10. Append experiment record to experiments.jsonl
-
-### Experiment Record Format
-```json
-{
-  "id": 42,
-  "timestamp": "2026-03-21T04:23:00Z",
-  "hypothesis": "Increase d_model from 64 to 96",
-  "diff_summary": "+D_MODEL = 96  -D_MODEL = 64",
-  "val_ler": 0.0423,
-  "val_ler_d3": 0.0112,
-  "val_ler_d5": 0.0734,
-  "mwpm_ratio": 0.87,
-  "params": 340000,
-  "throughput_samples_sec": 125000,
-  "kept": true,
-  "wall_time_sec": 300
-}
-```
-
-### Research Priorities (ordered)
-1. Get a working baseline that trains and evaluates correctly
-2. Beat MWPM at d=3 (mwpm_ratio < 1.0)
-3. Beat MWPM at d=5
-4. Explore architectural variants: attention patterns, normalization,
-   activation functions, positional encodings
-5. Explore optimizer variants: AdamW, Lion, schedule-free AdamW
-6. Explore data efficiency: curriculum learning, noise scheduling
-7. Explore temporal compression strategies
-8. Push to d=7 if compute allows
-
-### What NOT to Do
-- Do not modify prepare.py or eval.py
-- Do not change the evaluation metric or time budget
-- Do not install additional pip packages without asking
-- Do not try distributed training or multi-GPU setups
-- Keep changes atomic: one hypothesis per experiment
-
-## Pitfalls
-- MPS backend does not support all CUDA operations; use
-  `torch.backends.mps.is_available()` for device detection
-- Stim data generation is CPU-bound; cache aggressively
-- Small models at low d can overfit quickly; watch train vs val gap
-- Binary cross-entropy requires careful numerical stability
-  (use `torch.nn.functional.binary_cross_entropy_with_logits`)
-
-## Verification
-- Experiment succeeds if train.py runs without error and prints
-  a RESULT line
-- An experiment is "kept" if val_ler < current_best_val_ler
-- Periodically run plot_progress.py to visualize the research arc
-```
-
-### 5.4 Autonomous Operation via Cron
-
-Configure Hermes Agent to run experiments overnight:
+### 5.2 Repo-Local Adapter Structure
 
 ```
-# In Hermes CLI or messaging:
-/cron "Every 10 minutes from 11pm to 7am, run a nanoqec experiment
-       using the experiment protocol. Use the nanoqec skill."
+nanoqec/
+├── AGENTS.md
+├── docs/
+│   ├── implementation-v0.md
+│   ├── hermes-ops.md
+│   └── nanoqec-plan.md
+├── SKILL.md
+├── program.md
+└── scripts/
+    ├── check_improvement.py
+    ├── plot_progress.py
+    └── tune_profile.py
 ```
 
-Expected throughput: ~48 experiments per 8-hour overnight session (at 5-minute time budget + 5-minute overhead per experiment).
+### 5.3 Adapter Content
+
+`SKILL.md` and `program.md` are intentionally short. Their job is to redirect
+Hermes into the repo-local authority docs, not to duplicate a second full
+protocol. The practical experiment protocol is now:
+
+1. Read `AGENTS.md`, `docs/implementation-v0.md`, and `docs/hermes-ops.md`.
+2. Work on a short-lived branch.
+3. Mutate only the allowed implementation surface behind the protected harness.
+4. Run the documented `uv` validation and experiment commands.
+5. Use `results/experiments.jsonl`, structured metrics JSON, and the final `RESULT` line for comparison.
+6. Keep or discard the branch. In v0, merges remain explicit and local rather than automatic.
+
+### 5.4 Future Autonomous Operation
+
+Once the local baseline is meaningfully stronger and Hermes runtime/provider
+health is stable, the same harness can be extended to:
+
+- scheduled overnight runs
+- cloud or SSH-backed execution
+- stronger promotion rules
+- eventually, guarded automation around promotion
+- an optional richer Hermes skill bundle derived from the repo-local authority docs for convenience and distribution, but not as an independent source of truth
 
 ### 5.5 Hermes Memory Integration
 
@@ -434,7 +370,8 @@ After each experiment, Hermes's memory system will naturally accumulate:
 - Effective hyperparameter ranges
 - Common failure modes and fixes
 
-This accumulated knowledge improves experiment quality over time without explicit programming.
+This accumulated knowledge can improve experiment quality over time, but the
+repo-local docs and tests still remain authoritative.
 
 ---
 
@@ -460,7 +397,7 @@ if DEVICE == "mps":
     os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 ```
 
-### 6.2 Cloud GPU: Prime Intellect (Primary Platform)
+### 6.2 Cloud GPU: Prime Intellect (Future Scaling Platform)
 
 Prime Intellect is a compute exchange that aggregates GPU resources from 12+ cloud providers into a unified marketplace with competitive, transparent pricing. Their mission to democratize and commoditize compute aligns with Zetetic Works' open-source neolab ethos. Prime Intellect also builds open-source distributed training infrastructure (PRIME-RL, OpenDiLoCo) and trains open models (INTELLECT-1/2/3), making them a natural partner for open AI-for-science work.
 
@@ -473,16 +410,16 @@ Prime Intellect is a compute exchange that aggregates GPU resources from 12+ clo
 
 **Recommended GPU for NanoQEC**: The **A100 80GB at $0.79/hr** is the sweet spot. Our ~210K parameter decoder is tiny enough that the A100 is never compute-bottlenecked, and the 80GB VRAM allows very large batch sizes (2048+) and data caching entirely in GPU memory. For budget-conscious overnight runs, the RTX 4090 at $0.32/hr handles d=3,5 comfortably. For burst experiments pushing to d=7+, the H100 at $1.49/hr provides maximum throughput.
 
-**Hermes Agent integration**: Hermes Agent connects to Prime Intellect instances via its SSH terminal backend. Provision a pod on Prime Intellect's dashboard or CLI (`prime pods create --name nanoqec`), configure SSH credentials in Hermes, and the agent can execute training runs remotely while you sleep.
+**Hermes Agent integration**: Hermes can eventually connect to Prime Intellect instances via an SSH terminal backend, but that is not part of the current local v0 workflow.
 
 ### 6.3 Recommended Workflow
 
-1. **Develop and debug locally** on M4 Pro with d=3, 1-minute time budget
-2. **Run overnight experiments locally** on M4 Pro with d=3,5, 3-minute time budget
-3. **Scale to Prime Intellect A100** for d=5,7 experiments with 5-minute time budget
-4. **Burst on Prime Intellect H100** when exploring a promising direction at d=7+
+1. **Develop and tune locally** on M4 Pro or CPU using the fixed `local-d3-v1` and `local-d5-v1` profiles
+2. **Stabilize the baseline locally** until the aggregate `mwpm_ratio` is meaningfully below the current local baseline and trending toward 1.0
+3. **Run a real Hermes dry-run locally** once the provider/runtime path is healthy
+4. **Only then scale outward** to cloud GPUs, longer runs, or overnight execution
 
-Total overnight cost: $0 (local M4 Pro) to ~$6 (8 hours on Prime Intellect A100 at $0.79/hr).
+Cloud cost planning remains relevant for later scaling, but it is not part of the current implementation contract.
 
 ---
 
@@ -490,25 +427,27 @@ Total overnight cost: $0 (local M4 Pro) to ~$6 (8 hours on Prime Intellect A100 
 
 ```
 nanoqec/
-├── pyproject.toml          # Dependencies: torch, stim, pymatching, numpy
+├── AGENTS.md               # Operational authority
+├── pyproject.toml          # Package metadata and dependencies
 ├── .python-version         # 3.11
-├── prepare.py              # Data generation + evaluation utilities (DO NOT MODIFY)
-├── train.py                # Model + training loop (AGENT MODIFIES THIS)
-├── eval.py                 # Evaluation harness (DO NOT MODIFY)
-├── program.md              # Autoresearch instructions (human-iterated)
-├── experiments.jsonl       # Experiment log (append-only)
-├── data/                   # Cached syndrome data (.npz files)
-│   ├── d3_r3_p0.001.npz
-│   ├── d3_r3_p0.003.npz
-│   └── ...
-├── checkpoints/            # Saved model weights
-│   ├── best_model.pt
-│   └── latest_model.pt
-├── results/                # Evaluation results and plots
-│   ├── progress.png
-│   └── ler_vs_p.png
-└── .hermes/                # (Optional) local Hermes context files
-    └── context.md          # Project-specific context for Hermes
+├── uv.lock                 # Locked dependency graph
+├── prepare.py              # Thin public prepare entrypoint
+├── train.py                # Thin public train entrypoint
+├── eval.py                 # Thin public eval entrypoint
+├── README.md               # Quickstart and validation commands
+├── SKILL.md                # Thin Hermes adapter
+├── program.md              # Thin program pointer
+├── docs/
+│   ├── implementation-v0.md
+│   ├── hermes-ops.md
+│   └── nanoqec-plan.md
+├── src/nanoqec/            # Mutable implementation surface
+├── scripts/                # Research utilities and tuning harness
+├── tests/                  # Smoke and contract coverage
+├── .github/workflows/ci.yml
+├── data/                   # Gitignored prepared profile artifacts
+├── checkpoints/            # Gitignored saved model weights
+└── results/                # Gitignored metrics, plots, and experiments.jsonl
 ```
 
 ### 7.1 Dependencies
@@ -519,99 +458,82 @@ name = "nanoqec"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.2",
-    "stim>=1.14",
-    "pymatching>=2.2",
-    "numpy>=1.26",
-    "matplotlib>=3.8",
+    "matplotlib>=3.8,<4",
+    "numpy>=1.26,<3",
+    "pymatching>=2.2,<3",
+    "stim>=1.14,<2",
+    "torch>=2.2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.11,<0.12",
 ]
 ```
 
 ---
 
-## 8. Implementation Plan
+## 8. Implementation Status And Next Phases
 
-Working backward from the goal of autonomous overnight experiments:
+The original bootstrap plan is largely complete. The repo no longer needs a
+from-scratch implementation pass; it needs decoder improvement and carefully
+sequenced expansion.
 
-### Phase 0: Environment Setup (1-2 hours)
+### Phase 0: Harness And Repo Authority
 
-- [ ] Install Hermes Agent (`curl -fsSL ... | bash`)
-- [ ] Configure Hermes with preferred LLM backend (recommend Claude Sonnet 4.6 via OpenRouter or Nous Portal)
-- [ ] Install Prime Intellect CLI: `uv tool install prime && prime login`
-- [ ] Create `nanoqec/` repo with `uv init`
-- [ ] Install dependencies: `uv add torch stim pymatching numpy matplotlib`
-- [ ] Verify Stim and PyTorch work on target device (MPS locally; CUDA on Prime Intellect pod)
-- [ ] Install the `nanoqec` skill to `~/.hermes/skills/research/nanoqec/`
+- [x] Add repo-local authority docs and thin Hermes adapters
+- [x] Standardize on `uv`, locked dependencies, and Python 3.11
+- [x] Add CI, tests, and a package scaffold under `src/nanoqec/`
 
-### Phase 1: Data Pipeline (2-3 hours)
+### Phase 1: Deterministic Local Data Pipeline
 
-- [ ] Implement `prepare.py`:
-  - Stim circuit generation for d=3,5 with configurable noise
-  - Syndrome data generation and caching to `data/`
-  - DataLoader class that yields batches of (detection_events, observable_flips)
-  - Detector coordinate extraction for reshaping flat arrays to grid
-  - MWPM baseline computation and caching
-- [ ] Verify: generate 100K samples at d=3, p=0.005; confirm shapes and label distribution
+- [x] Implement profile-based `prepare.py` for `local-d3-v1` and `local-d5-v1`
+- [x] Cache deterministic train/validation slices and manifests
+- [x] Compute and store MWPM baselines per slice and in aggregate
 
-### Phase 2: Baseline Decoder (3-4 hours)
+### Phase 2: Baseline Decoder And Evaluation
 
-- [ ] Implement initial `train.py`:
-  - `SyndromeEmbedding` module (linear projection + index embedding + spatial RoPE)
-  - `GatedRecurrence` module (element-wise gated RNN per stabilizer)
-  - `SpatialTransformer` module (multi-head attention + FFN)
-  - `TemporalCompression` module (concatenate + project)
-  - `ReadoutHead` module (mean pool + MLP)
-  - `NanoQECDecoder` model composing the above
-  - Training loop with fixed time budget
-  - Metric logging and RESULT output
-- [ ] Verify: train on d=3 for 1 minute, confirm loss decreases and val_ler is reported
+- [x] Implement a minimal AQ2-style decoder with a stable train/eval contract
+- [x] Save reloadable checkpoints with model-spec metadata
+- [x] Report aggregate and per-slice metrics plus MWPM comparisons
+- [x] Support at least one alternate model path to prove architecture replaceability
 
-### Phase 3: Evaluation Harness (1-2 hours)
+### Phase 3: Research Utilities And Tuning
 
-- [ ] Implement `eval.py`:
-  - Load best model checkpoint
-  - Evaluate across all distances and error rates
-  - Compute MWPM comparison ratio
-  - Generate LER vs physical error rate plots
-  - Output structured JSON results
-- [ ] Verify: eval produces results and plots; compare neural decoder to MWPM at d=3
+- [x] Add experiment comparison and progress plotting utilities
+- [x] Add a repeated tuning harness for fixed-profile config comparison
+- [x] Promote the current stronger local baseline defaults based on repeated runs
 
-### Phase 4: Autoresearch Loop (2-3 hours)
+### Phase 4: Remaining Near-Term Work
 
-- [ ] Write `program.md` with experiment protocol
-- [ ] Write full `SKILL.md` and supporting reference documents
-- [ ] Implement `scripts/check_improvement.py` (parse RESULT, compare to best)
-- [ ] Implement `scripts/plot_progress.py` (read experiments.jsonl, plot LER over time)
-- [ ] Set up git repo with initial commit
-- [ ] Test one full experiment cycle manually via Hermes
+- [ ] Improve the local `d=3` baseline until aggregate `mwpm_ratio < 1.0`
+- [ ] Tune and evaluate `local-d5-v1` using the same repeated-run discipline
+- [ ] Run a real Hermes repo dry-run once provider/runtime configuration is healthy
+- [ ] Harden promotion criteria once the decoder is materially stronger
 
-### Phase 5: Autonomous Operation (1 hour + overnight)
+### Phase 5: Deferred Expansion
 
-- [ ] Configure Hermes cron for overnight experiments
-- [ ] Run first overnight batch
-- [ ] Review experiment log and progress plot in the morning
-- [ ] Iterate on `program.md` / `SKILL.md` based on agent behavior
-
-### Phase 6: Scale and Explore (ongoing)
-
-- [ ] Extend to d=7 on Prime Intellect A100/H100
-- [ ] Explore color code circuits (AQ2's other target)
-- [ ] Add soft readout support (analog syndrome values)
-- [ ] Benchmark against published neural decoder results
+- [ ] Mixed-distance training in a single run
+- [ ] Cloud or Prime Intellect execution
+- [ ] Cron or overnight autonomous operation
+- [ ] Stronger guarded automation around promotion
+- [ ] Larger-distance and broader-code exploration
 
 ---
 
 ## 9. Success Criteria
 
-| Milestone | Criterion | Estimated Timeline |
-|-----------|-----------|-------------------|
-| M0: Runs | train.py completes one experiment without error | Day 1 |
-| M1: Learns | Neural decoder val_ler improves with training (loss decreases) | Day 1 |
-| M2: Beats MWPM at d=3 | mwpm_ratio < 1.0 at d=3, p=0.005 | Day 2-3 |
-| M3: Autonomous | Hermes runs 10+ experiments without human intervention | Day 2-3 |
-| M4: Beats MWPM at d=5 | mwpm_ratio < 1.0 at d=5, p=0.005 | Week 1-2 |
-| M5: Scaling | Successful training and evaluation at d=7 | Week 2-4 |
-| M6: Insight | Agent discovers a non-obvious architectural improvement | Ongoing |
+| Milestone | Criterion | Status |
+|-----------|-----------|--------|
+| M0: Harness Runs | `prepare.py`, `train.py`, and `eval.py` complete a local profile cycle without error | Complete |
+| M1: Harness Is Reproducible | deterministic manifests, tests, CI, and runtime experiment logs exist | Complete |
+| M2: Beats MWPM at d=3 | aggregate `mwpm_ratio < 1.0` on the local `d=3` profile | Open |
+| M3: Hermes Dry-Run | Hermes completes a repo-local dry-run with healthy provider/runtime config | Open |
+| M4: Beats MWPM at d=5 | aggregate `mwpm_ratio < 1.0` on the local `d=5` profile | Open |
+| M5: Mixed Distance | one training run spans multiple distances under the same harness | Deferred |
+| M6: Scaling | stable cloud or overnight operation under guarded promotion rules | Deferred |
+| M7: Insight | the research loop discovers and validates a non-obvious improvement | Ongoing |
 
 ---
 
@@ -622,13 +544,13 @@ Working backward from the goal of autonomous overnight experiments:
 | Syndrome simulation | Stim (Google) | Apache 2.0 | Generate training data |
 | Baseline decoder | PyMatching | Apache 2.0 | MWPM comparison |
 | Training framework | PyTorch | BSD | Neural network training |
-| Compute platform | Prime Intellect | Proprietary (open-source tooling) | GPU marketplace and training infra |
+| Compute platform | Prime Intellect | Proprietary (open-source tooling) | Future GPU scaling and training infra |
 | Agent framework | Hermes Agent (Nous) | Apache 2.0 | Autonomous experiment driver |
 | Package manager | uv (Astral) | MIT | Dependency management |
 | Version control | Git | GPL | Experiment branching |
 | LLM backend | Any (via OpenRouter) | Various | Agent intelligence |
 
-Total infrastructure cost for overnight research: $0 (local M4 Pro) to ~$6 (8 hours on Prime Intellect A100).
+Current required infrastructure cost is local-only. Cloud cost planning remains a future scaling concern.
 
 ---
 
@@ -640,7 +562,7 @@ Total infrastructure cost for overnight research: $0 (local M4 Pro) to ~$6 (8 ho
 | Agent makes breaking changes | Lost progress | Git branching ensures `main` always has a working version |
 | Overfitting at small d | Misleading metrics | Track train/val gap; use mixed-distance training |
 | Stim data not representative | Poor generalization | Use multiple noise models; add noise augmentation |
-| Hermes skill too rigid | Agent wastes experiments | Iterate on SKILL.md based on experiment logs; keep priorities loose |
+| Hermes adapter/runbook too rigid | Agent wastes experiments | Keep repo authority in `AGENTS.md` and `docs/`; keep `SKILL.md` thin |
 | Compute too limited for d=7 | Can't reach M5 | Focus on d=3,5 insights; scale to Prime Intellect A100/H100 for d=7 push |
 
 ---
