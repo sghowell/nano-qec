@@ -82,7 +82,13 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     device = resolve_device(args.device)
     model.to(device)
 
-    aggregate, per_slice = evaluate_profile(model, slice_arrays, device)
+    decision_threshold = float(metadata.get("decision_threshold", 0.5))
+    aggregate, per_slice = evaluate_profile(
+        model,
+        slice_arrays,
+        device,
+        decision_threshold=decision_threshold,
+    )
     results_dir = (args.workspace.resolve() / args.results_dir).resolve()
     results_dir.mkdir(parents=True, exist_ok=True)
     eval_id = f"{checkpoint_path.stem}-eval"
@@ -100,6 +106,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         "checkpoint_path": str(checkpoint_path),
         "model_name": metadata["model_name"],
         "model_spec": metadata["model_spec"],
+        "decision_threshold": decision_threshold,
         **aggregate,
         "per_slice": per_slice,
         "plot_path": plot_path,

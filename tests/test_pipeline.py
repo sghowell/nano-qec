@@ -59,10 +59,12 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
     baseline_metrics = run_train(parse_train_args(common_args))
     baseline_output = capsys.readouterr().out
     baseline_result = parse_result_line(baseline_output)
+    baseline_metrics_payload = json.loads(Path(baseline_metrics["metrics_path"]).read_text())
     assert Path(baseline_metrics["checkpoint_path"]).exists()
     assert Path(baseline_metrics["best_checkpoint_path"]).exists()
     assert Path(baseline_metrics["metrics_path"]).exists()
     assert {"run_id", "val_ler", "mwpm_ratio", "kept"} <= baseline_result.keys()
+    assert "decision_threshold" in baseline_metrics_payload
 
     eval_summary = run_eval(
         parse_eval_args(
@@ -82,6 +84,7 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
     assert Path(eval_summary["result_path"]).exists()
     eval_payload = json.loads(eval_output.strip())
     assert eval_payload["model_name"] == "minimal_aq2"
+    assert eval_payload["decision_threshold"] == baseline_metrics_payload["decision_threshold"]
     assert len(eval_payload["per_slice"]) == 5
 
     alt_metrics = run_train(

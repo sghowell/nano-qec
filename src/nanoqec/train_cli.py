@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 from nanoqec.contracts import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -130,18 +131,105 @@ def build_optimizer(
 def evaluate_binary_logits(logits: Tensor, labels: Tensor) -> tuple[float, float]:
     """Compute logical error rate and accuracy from logits."""
 
+    return evaluate_binary_logits_with_threshold(logits, labels, decision_threshold=0.5)
+
+
+def evaluate_binary_logits_with_threshold(
+    logits: Tensor,
+    labels: Tensor,
+    decision_threshold: float,
+) -> tuple[float, float]:
+    """Compute logical error rate and accuracy from logits at a fixed threshold."""
+
     probs = torch.sigmoid(logits)
-    predictions = (probs >= 0.5).to(labels.dtype)
+    predictions = (probs >= decision_threshold).to(labels.dtype)
     mismatch = (predictions != labels).to(torch.float32)
     val_ler = float(mismatch.mean().item())
     val_accuracy = float(1.0 - val_ler)
     return val_ler, val_accuracy
 
 
+def build_p_error_batch(
+    p_error: float,
+    batch_size: int,
+    device: torch.device,
+) -> Tensor:
+    """Build one physical-error-rate conditioning tensor for a batch."""
+
+    return torch.full((batch_size,), float(p_error), dtype=torch.float32, device=device)
+
+
+def forward_model(
+    model: nn.Module,
+    detector_events: Tensor,
+    p_error: Tensor,
+) -> Tensor:
+    """Run a decoder with the internal conditioning metadata it expects."""
+
+    return model(detector_events, p_error=p_error)
+
+
+def balanced_bce_loss(
+    logits: Tensor,
+    labels: Tensor,
+    pos_weight: float,
+) -> Tensor:
+    """Blend standard BCE with a slice-balanced positive-class weighting."""
+
+    unweighted = F.binary_cross_entropy_with_logits(logits, labels)
+    weighted = F.binary_cross_entropy_with_logits(
+        logits,
+        labels,
+        pos_weight=torch.tensor(pos_weight, dtype=logits.dtype, device=logits.device),
+    )
+    return 0.5 * (unweighted + weighted)
+
+
+def select_decision_threshold(
+    model: nn.Module,
+    slice_arrays: list[DatasetSliceArrays],
+    device: torch.device,
+) -> float:
+    """Choose a global threshold that minimizes train-split aggregate LER."""
+
+    candidate_thresholds = np.linspace(0.05, 0.95, 19)
+    best_threshold = 0.5
+    best_ler = float("inf")
+    model.eval()
+    with torch.no_grad():
+        for threshold in candidate_thresholds:
+            slice_lers: list[float] = []
+            for dataset_slice in slice_arrays:
+                features = torch.tensor(
+                    dataset_slice.train_events,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                labels = torch.tensor(
+                    dataset_slice.train_labels.reshape(-1),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                p_error = build_p_error_batch(dataset_slice.p_error, features.shape[0], device)
+                logits = forward_model(model, features, p_error)
+                train_ler, _ = evaluate_binary_logits_with_threshold(
+                    logits,
+                    labels,
+                    decision_threshold=float(threshold),
+                )
+                slice_lers.append(train_ler)
+            aggregate_ler = float(np.mean(slice_lers))
+            if aggregate_ler < best_ler:
+                best_ler = aggregate_ler
+                best_threshold = float(threshold)
+    return best_threshold
+
+
 def evaluate_profile(
     model: nn.Module,
     slice_arrays: list[DatasetSliceArrays],
     device: torch.device,
+    decision_threshold: float = 0.5,
 ) -> tuple[dict[str, float], list[dict[str, Any]]]:
     """Evaluate a model across all prepared slices for a dataset profile."""
 
@@ -155,8 +243,13 @@ def evaluate_profile(
                 dtype=torch.float32,
                 device=device,
             )
-            logits = model(features)
-            val_ler, val_accuracy = evaluate_binary_logits(logits, labels)
+            p_error = build_p_error_batch(dataset_slice.p_error, features.shape[0], device)
+            logits = forward_model(model, features, p_error)
+            val_ler, val_accuracy = evaluate_binary_logits_with_threshold(
+                logits,
+                labels,
+                decision_threshold=decision_threshold,
+            )
             mwpm_val_ler = float(dataset_slice.mwpm_val_ler)
             mwpm_ratio = float(val_ler / mwpm_val_ler) if mwpm_val_ler > 0 else float("inf")
             per_slice.append(
@@ -239,6 +332,7 @@ def build_checkpoint_payload(
     model_spec: dict[str, Any],
     device: torch.device,
     best_metrics: dict[str, Any],
+    decision_threshold: float,
 ) -> dict[str, Any]:
     """Build checkpoint metadata."""
 
@@ -258,6 +352,7 @@ def build_checkpoint_payload(
         "dataset_id": manifest.dataset_id,
         "train_seed": args.train_seed,
         "git_sha": args.git_sha or current_git_sha(),
+        "decision_threshold": decision_threshold,
         "profile": manifest.profile,
         "distance": manifest.distance,
         "rounds": manifest.rounds,
@@ -283,7 +378,6 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
 
     model = build_model(args.model_name, layout, model_spec=model_spec).to(device)
     optimizer = build_optimizer(model, args.optimizer, args.learning_rate, args.weight_decay)
-    loss_fn = nn.BCEWithLogitsLoss()
     rng = np.random.default_rng(args.train_seed)
 
     steps = 0
@@ -292,8 +386,7 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
     last_eval_time = 0.0
     start_time = time.perf_counter()
     best_state_dict = copy.deepcopy(model.state_dict())
-    best_aggregate: dict[str, Any] | None = None
-    best_per_slice: list[dict[str, Any]] = []
+    best_selection_aggregate: dict[str, Any] | None = None
 
     while True:
         elapsed = time.perf_counter() - start_time
@@ -301,9 +394,10 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
             break
         selected_slice = slice_arrays[int(rng.integers(0, len(slice_arrays)))]
         batch_x, batch_y = sample_train_batch(selected_slice, args.batch_size, rng, device)
+        batch_p_error = build_p_error_batch(selected_slice.p_error, len(batch_x), device)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(batch_x)
-        loss = loss_fn(logits, batch_y)
+        logits = forward_model(model, batch_x, batch_p_error)
+        loss = balanced_bce_loss(logits, batch_y, selected_slice.train_pos_weight)
         loss.backward()
         optimizer.step()
 
@@ -313,25 +407,40 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
 
         elapsed = time.perf_counter() - start_time
         if elapsed - last_eval_time >= args.eval_interval_seconds:
-            aggregate, per_slice = evaluate_profile(model, slice_arrays, device)
-            if best_aggregate is None or (
-                aggregate["aggregate_val_ler"] < best_aggregate["aggregate_val_ler"]
+            aggregate, per_slice = evaluate_profile(
+                model,
+                slice_arrays,
+                device,
+            )
+            if best_selection_aggregate is None or (
+                aggregate["aggregate_val_ler"] < best_selection_aggregate["aggregate_val_ler"]
             ):
-                best_aggregate = aggregate
-                best_per_slice = per_slice
+                best_selection_aggregate = aggregate
                 best_state_dict = copy.deepcopy(model.state_dict())
             last_eval_time = elapsed
 
-    final_aggregate, final_per_slice = evaluate_profile(model, slice_arrays, device)
-    if best_aggregate is None or (
-        final_aggregate["aggregate_val_ler"] < best_aggregate["aggregate_val_ler"]
+    final_aggregate, final_per_slice = evaluate_profile(
+        model,
+        slice_arrays,
+        device,
+    )
+    if best_selection_aggregate is None or (
+        final_aggregate["aggregate_val_ler"] < best_selection_aggregate["aggregate_val_ler"]
     ):
-        best_aggregate = final_aggregate
-        best_per_slice = final_per_slice
+        best_selection_aggregate = final_aggregate
         best_state_dict = copy.deepcopy(model.state_dict())
 
-    if best_aggregate is None:
+    if best_selection_aggregate is None:
         raise RuntimeError("training produced no evaluation results")
+
+    model.load_state_dict(best_state_dict)
+    best_decision_threshold = select_decision_threshold(model, slice_arrays, device)
+    best_aggregate, best_per_slice = evaluate_profile(
+        model,
+        slice_arrays,
+        device,
+        decision_threshold=best_decision_threshold,
+    )
 
     wall_time = max(time.perf_counter() - start_time, 1e-9)
     run_id = f"{args.model_name}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
@@ -352,6 +461,7 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
         model_spec=model_spec,
         device=device,
         best_metrics=best_aggregate,
+        decision_threshold=best_decision_threshold,
     )
     torch.save(
         {"metadata": checkpoint_metadata, "state_dict": model.state_dict()},
@@ -386,6 +496,7 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
         "throughput_samples_per_second": examples_seen / wall_time,
         "train_loss_last": last_loss,
         "optimizer": args.optimizer,
+        "decision_threshold": best_decision_threshold,
         "parameter_count": parameter_count(model),
         **best_aggregate,
         "per_slice": best_per_slice,

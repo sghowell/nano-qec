@@ -245,9 +245,21 @@ class MinimalAQ2Decoder(nn.Module):
         super().__init__()
         self.layout = layout
         self.event_projection = nn.Linear(1, d_model)
+        self.event_state_embedding = nn.Embedding(2, d_model)
         self.detector_embedding = nn.Embedding(layout.detector_count + 1, d_model)
         self.coordinate_projection = nn.Linear(2, d_model)
         self.time_embedding = nn.Embedding(time_steps, d_model)
+        self.physical_error_projection = nn.Sequential(
+            nn.Linear(2, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.flat_syndrome_projection = nn.Sequential(
+            nn.LayerNorm(layout.detector_count),
+            nn.Linear(layout.detector_count, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
         self.input_dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList(
             [
@@ -296,12 +308,16 @@ class MinimalAQ2Decoder(nn.Module):
             persistent=False,
         )
 
-    def forward(self, detector_events: Tensor) -> Tensor:
+    def forward(self, detector_events: Tensor, p_error: Tensor | None = None) -> Tensor:
         bucketed_events = self._to_bucket_grid(detector_events)
-        hidden = self.event_projection(bucketed_events.unsqueeze(-1))
+        event_features = 2.0 * bucketed_events.unsqueeze(-1) - 1.0
+        hidden = self.event_projection(event_features)
+        hidden = hidden + self.event_state_embedding(bucketed_events.to(torch.long))
         hidden = hidden + self.detector_embedding(self.detector_index_grid)[None, :, :, :]
         hidden = hidden + self.coordinate_projection(self.coord_grid)[None, :, :, :]
+        physical_error_embedding = self._physical_error_embedding(detector_events, p_error)
         hidden = hidden + self.time_embedding(self.time_index_grid)[None, :, None, :]
+        hidden = hidden + physical_error_embedding[:, None, None, :]
         hidden = self.input_dropout(hidden)
         valid_mask = self.valid_mask_grid
         hidden = hidden * valid_mask[None, :, :, None].to(hidden.dtype)
@@ -312,7 +328,25 @@ class MinimalAQ2Decoder(nn.Module):
         pooled = self._masked_mean(hidden, valid_mask)
         compressed = self.temporal_compression(pooled)
         summary = self.summary_recurrence(compressed)
+        summary = (
+            summary
+            + self.flat_syndrome_projection(detector_events)
+            + physical_error_embedding
+        )
         return self.head(summary).squeeze(-1)
+
+    def _physical_error_embedding(self, detector_events: Tensor, p_error: Tensor | None) -> Tensor:
+        if p_error is None:
+            p_error = detector_events.new_zeros((detector_events.shape[0],))
+        p_error = p_error.to(dtype=detector_events.dtype, device=detector_events.device)
+        raw_and_log = torch.stack(
+            [
+                p_error,
+                torch.log10(p_error.clamp_min(1e-6)),
+            ],
+            dim=-1,
+        )
+        return self.physical_error_projection(raw_and_log)
 
     def _to_bucket_grid(self, detector_events: Tensor) -> Tensor:
         batch_size = detector_events.shape[0]
@@ -341,5 +375,6 @@ class TrivialLinearDecoder(nn.Module):
         super().__init__()
         self.linear = nn.Linear(detector_count, 1)
 
-    def forward(self, detector_events: Tensor) -> Tensor:
+    def forward(self, detector_events: Tensor, p_error: Tensor | None = None) -> Tensor:
+        del p_error
         return self.linear(detector_events).squeeze(-1)
