@@ -107,9 +107,9 @@ def test_tuning_script_runs_one_repeat(tmp_path: Path) -> None:
         "--config",
         "baseline",
         "--repeats",
-        "1",
+        "2",
         "--duration-seconds",
-        "0.2",
+        "0.1",
         "--eval-interval-seconds",
         "0.1",
         "--device",
@@ -120,5 +120,9 @@ def test_tuning_script_runs_one_repeat(tmp_path: Path) -> None:
     summary_payload = json.loads(summary_path.read_text())
     assert summary_payload["schema_version"] == "nanoqec.tuning.v1"
     assert summary_payload["configs"][0]["config_name"] == "baseline"
-    assert summary_payload["configs"][0]["repeat_count"] == 1
-    assert len(summary_payload["configs"][0]["runs"]) == 1
+    assert summary_payload["configs"][0]["repeat_count"] == 2
+    assert len(summary_payload["configs"][0]["runs"]) == 2
+    assert [run["train_seed"] for run in summary_payload["configs"][0]["runs"]] == [
+        20260323,
+        20260324,
+    ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -27,18 +28,18 @@ class ConfigPreset:
 CONFIG_PRESETS: dict[str, ConfigPreset] = {
     "baseline": ConfigPreset(
         name="baseline",
-        description="Current default minimal AQ2 baseline.",
+        description="Current default minimal AQ2 baseline (Lion optimizer).",
         train_args=(),
+    ),
+    "adamw": ConfigPreset(
+        name="adamw",
+        description="Previous AdamW baseline for direct comparison against the default.",
+        train_args=("--optimizer", "adamw"),
     ),
     "lr1e3": ConfigPreset(
         name="lr1e3",
-        description="Higher AdamW learning rate for faster fixed-budget convergence.",
-        train_args=("--learning-rate", "1e-3"),
-    ),
-    "lion": ConfigPreset(
-        name="lion",
-        description="Lion optimizer with the baseline learning rate.",
-        train_args=("--optimizer", "lion"),
+        description="AdamW at 1e-3 for a higher-learning-rate comparison.",
+        train_args=("--optimizer", "adamw", "--learning-rate", "1e-3"),
     ),
 }
 
@@ -60,6 +61,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--duration-seconds", type=float, default=30.0)
     parser.add_argument("--eval-interval-seconds", type=float, default=5.0)
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="cpu")
+    parser.add_argument("--base-train-seed", type=int, default=20260323)
     parser.add_argument("--results-root", type=Path, default=Path("results/tuning"))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("checkpoints/tuning"))
     parser.add_argument("--train-script", type=Path, default=Path("train.py"))
@@ -79,7 +81,7 @@ def parse_result_line(output: str) -> dict[str, Any]:
 def resolve_configs(config_names: list[str] | None) -> list[ConfigPreset]:
     """Return the requested config presets or the default sweep set."""
 
-    names = config_names or ["baseline", "lr1e3", "lion"]
+    names = config_names or ["baseline", "adamw", "lr1e3"]
     return [CONFIG_PRESETS[name] for name in names]
 
 
@@ -92,11 +94,40 @@ def load_primary_metrics(metrics_payload: dict[str, Any]) -> tuple[float, float]
     )
 
 
+def safe_mean(values: list[float]) -> float:
+    """Compute a summary mean that tolerates non-finite values."""
+
+    if all(math.isfinite(value) for value in values):
+        return float(mean(values))
+    if values and all(value == values[0] for value in values):
+        return float(values[0])
+    finite_values = [value for value in values if math.isfinite(value)]
+    if finite_values:
+        return float(mean(finite_values))
+    return float("inf")
+
+
+def safe_pstdev(values: list[float]) -> float:
+    """Compute a population stdev that tolerates non-finite values."""
+
+    if len(values) <= 1:
+        return 0.0
+    if all(math.isfinite(value) for value in values):
+        return float(pstdev(values))
+    if all(value == values[0] for value in values):
+        return 0.0
+    finite_values = [value for value in values if math.isfinite(value)]
+    if len(finite_values) <= 1:
+        return 0.0
+    return float(pstdev(finite_values))
+
+
 def build_run_command(
     train_script: Path,
     workspace: Path,
     dataset_manifest: Path,
     device: str,
+    train_seed: int,
     duration_seconds: float,
     eval_interval_seconds: float,
     checkpoint_dir: Path,
@@ -115,6 +146,8 @@ def build_run_command(
         str(dataset_manifest),
         "--device",
         device,
+        "--train-seed",
+        str(train_seed),
         "--duration-seconds",
         str(duration_seconds),
         "--eval-interval-seconds",
@@ -143,6 +176,7 @@ def run_single_training(
     """Run one fixed-budget training job and return structured results."""
 
     repeat_dir = Path(sweep_id) / preset.name / f"repeat-{repeat_index:02d}"
+    train_seed = args.base_train_seed + repeat_index - 1
     checkpoint_dir = (workspace / args.checkpoint_root / repeat_dir).resolve()
     results_dir = (workspace / args.results_root / repeat_dir).resolve()
     command = build_run_command(
@@ -150,6 +184,7 @@ def run_single_training(
         workspace=workspace,
         dataset_manifest=dataset_manifest,
         device=args.device,
+        train_seed=train_seed,
         duration_seconds=args.duration_seconds,
         eval_interval_seconds=args.eval_interval_seconds,
         checkpoint_dir=checkpoint_dir,
@@ -170,6 +205,7 @@ def run_single_training(
     aggregate_val_ler, aggregate_mwpm_ratio = load_primary_metrics(metrics_payload)
     return {
         "repeat_index": repeat_index,
+        "train_seed": train_seed,
         "run_id": result_payload["run_id"],
         "aggregate_val_ler": aggregate_val_ler,
         "aggregate_mwpm_ratio": aggregate_mwpm_ratio,
@@ -192,10 +228,10 @@ def summarize_config_runs(preset: ConfigPreset, runs: list[dict[str, Any]]) -> d
         "description": preset.description,
         "train_args": list(preset.train_args),
         "repeat_count": len(runs),
-        "mean_val_ler": mean(val_lers),
-        "stdev_val_ler": pstdev(val_lers) if len(val_lers) > 1 else 0.0,
-        "mean_mwpm_ratio": mean(mwpm_ratios),
-        "stdev_mwpm_ratio": pstdev(mwpm_ratios) if len(mwpm_ratios) > 1 else 0.0,
+        "mean_val_ler": safe_mean(val_lers),
+        "stdev_val_ler": safe_pstdev(val_lers),
+        "mean_mwpm_ratio": safe_mean(mwpm_ratios),
+        "stdev_mwpm_ratio": safe_pstdev(mwpm_ratios),
         "best_val_ler": float(best_run["aggregate_val_ler"]),
         "best_run_id": str(best_run["run_id"]),
         "runs": runs,
@@ -249,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         "dataset_id": manifest.dataset_id,
         "dataset_manifest": str(dataset_manifest),
         "device": args.device,
+        "base_train_seed": args.base_train_seed,
         "duration_seconds": args.duration_seconds,
         "eval_interval_seconds": args.eval_interval_seconds,
         "repeats": args.repeats,
