@@ -108,6 +108,9 @@ RESULT {"run_id":"...","val_ler":0.123,"mwpm_ratio":1.1,"kept":false}
 The primary `val_ler` in the `RESULT` line is the aggregate mean validation LER
 across all slices in the manifest profile.
 
+Current repo defaults use the `lion` optimizer, a `60` second wall-clock
+budget, and the `warmup_cosine` scheduler for local research runs.
+
 ### `eval.py`
 
 Consumes a dataset manifest and checkpoint, then emits structured profile

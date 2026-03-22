@@ -46,14 +46,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["minimal_aq2", "trivial_linear"],
         default="minimal_aq2",
     )
-    parser.add_argument("--duration-seconds", type=float, default=30.0)
+    parser.add_argument("--duration-seconds", type=float, default=60.0)
     parser.add_argument("--eval-interval-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--train-seed", type=int, default=20260323)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--optimizer", choices=["adamw", "lion"], default="lion")
-    parser.add_argument("--scheduler", choices=["constant", "warmup_cosine"], default="constant")
+    parser.add_argument(
+        "--scheduler",
+        choices=["constant", "warmup_cosine"],
+        default="warmup_cosine",
+    )
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
     parser.add_argument("--min-learning-rate-scale", type=float, default=0.1)
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")

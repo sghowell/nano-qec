@@ -100,6 +100,9 @@ uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-tr
 
 See `docs/hermes-ops.md` for the full repo mutation policy and dry-run workflow.
 
+Current `train.py` defaults use a `60s` local budget with the `lion` optimizer
+and the `warmup_cosine` schedule.
+
 ## Validation
 
 ```bash
