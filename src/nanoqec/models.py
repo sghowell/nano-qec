@@ -100,6 +100,15 @@ def default_model_spec(model_name: str, layout: LayoutSpec) -> dict[str, Any]:
             "time_steps": layout.time_steps,
             "max_time_bucket_size": layout.max_time_bucket_size,
         }
+    if model_name == "spacetime_gnn":
+        return {
+            "d_model": 64,
+            "n_blocks": 4,
+            "dropout": 0.0,
+            "feedforward_mult": 4,
+            "time_steps": layout.time_steps,
+            "detector_count": layout.detector_count,
+        }
     if model_name == "trivial_linear":
         return {"detector_count": layout.detector_count}
     raise ValueError(f"unknown model: {model_name}")
@@ -115,6 +124,8 @@ def build_model(
     effective_model_spec = model_spec or default_model_spec(model_name, layout)
     if model_name == "minimal_aq2":
         return MinimalAQ2Decoder(layout=layout, **effective_model_spec)
+    if model_name == "spacetime_gnn":
+        return SpacetimeGraphDecoder(layout=layout, **effective_model_spec)
     if model_name == "trivial_linear":
         return TrivialLinearDecoder(detector_count=layout.detector_count)
     raise ValueError(f"unknown model: {model_name}")
@@ -429,6 +440,194 @@ class MinimalAQ2Decoder(nn.Module):
     def _masked_mean(hidden: Tensor, valid_mask: Tensor) -> Tensor:
         weights = valid_mask[None, :, :, None].to(hidden.dtype)
         return (hidden * weights).sum(dim=2) / weights.sum(dim=2).clamp_min(1.0)
+
+
+class TypedGraphBlock(nn.Module):
+    """Residual graph block with typed spatial and temporal message passing."""
+
+    def __init__(self, d_model: int, feedforward_mult: int, dropout: float) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.spatial_message = nn.Linear(d_model, d_model)
+        self.temporal_message = nn.Linear(d_model, d_model)
+        self.update_gate = nn.Linear(3 * d_model, d_model)
+        self.update_mlp = nn.Sequential(
+            nn.Linear(3 * d_model, d_model * feedforward_mult),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * feedforward_mult, d_model),
+        )
+        self.ff_norm = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_model * feedforward_mult),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * feedforward_mult, d_model),
+        )
+
+    def forward(self, hidden: Tensor, spatial_adj: Tensor, temporal_adj: Tensor) -> Tensor:
+        norm_hidden = self.norm(hidden)
+        spatial_hidden = torch.einsum(
+            "ij,bjd->bid", spatial_adj, self.spatial_message(norm_hidden)
+        )
+        temporal_hidden = torch.einsum(
+            "ij,bjd->bid", temporal_adj, self.temporal_message(norm_hidden)
+        )
+        joined = torch.cat([norm_hidden, spatial_hidden, temporal_hidden], dim=-1)
+        gate = torch.sigmoid(self.update_gate(joined))
+        hidden = hidden + gate * self.update_mlp(joined)
+        hidden = hidden + self.ff(self.ff_norm(hidden))
+        return hidden
+
+
+class SpacetimeGraphDecoder(nn.Module):
+    """A fuller typed space-time graph decoder over detector nodes."""
+
+    def __init__(
+        self,
+        layout: LayoutSpec,
+        d_model: int,
+        n_blocks: int,
+        dropout: float,
+        feedforward_mult: int,
+        time_steps: int,
+        detector_count: int,
+    ) -> None:
+        super().__init__()
+        del detector_count
+        self.layout = layout
+        self.event_state_embedding = nn.Embedding(2, d_model)
+        self.detector_embedding = nn.Embedding(layout.detector_count + 1, d_model)
+        self.coordinate_projection = nn.Linear(2, d_model)
+        self.time_embedding = nn.Embedding(time_steps, d_model)
+        self.physical_error_projection = nn.Sequential(
+            nn.Linear(2, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.flat_syndrome_projection = nn.Sequential(
+            nn.LayerNorm(layout.detector_count),
+            nn.Linear(layout.detector_count, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.blocks = nn.ModuleList(
+            [
+                TypedGraphBlock(
+                    d_model=d_model,
+                    feedforward_mult=feedforward_mult,
+                    dropout=dropout,
+                )
+                for _ in range(n_blocks)
+            ]
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 1),
+        )
+
+        detector_ids = [0] * layout.detector_count
+        time_ids = [0] * layout.detector_count
+        coords = [[0.0, 0.0] for _ in range(layout.detector_count)]
+        for time_index, detector_row in enumerate(layout.detector_index_grid):
+            for slot, detector_one_indexed in enumerate(detector_row):
+                if detector_one_indexed == 0:
+                    continue
+                detector_index = detector_one_indexed - 1
+                detector_ids[detector_index] = detector_one_indexed
+                time_ids[detector_index] = time_index
+                coords[detector_index] = list(layout.coord_grid[time_index][slot])
+
+        spatial_adj = [[0.0] * layout.detector_count for _ in range(layout.detector_count)]
+        temporal_adj = [[0.0] * layout.detector_count for _ in range(layout.detector_count)]
+        same_time_groups: dict[int, list[int]] = {}
+        for detector_index, time_index in enumerate(time_ids):
+            same_time_groups.setdefault(time_index, []).append(detector_index)
+        for group in same_time_groups.values():
+            for i in group:
+                dists = []
+                for j in group:
+                    if i == j:
+                        continue
+                    dx = coords[i][0] - coords[j][0]
+                    dy = coords[i][1] - coords[j][1]
+                    dists.append((dx * dx + dy * dy, j))
+                spatial_adj[i][i] = 1.0
+                for _, j in sorted(dists)[:3]:
+                    spatial_adj[i][j] = 1.0
+        for time_index in range(time_steps - 1):
+            src_group = same_time_groups.get(time_index, [])
+            dst_group = same_time_groups.get(time_index + 1, [])
+            for i in src_group:
+                dists = []
+                for j in dst_group:
+                    dx = coords[i][0] - coords[j][0]
+                    dy = coords[i][1] - coords[j][1]
+                    dists.append((dx * dx + dy * dy, j))
+                for _, j in sorted(dists)[:2]:
+                    temporal_adj[i][j] = 1.0
+                    temporal_adj[j][i] = 1.0
+            for i in src_group:
+                temporal_adj[i][i] = 1.0
+            for j in dst_group:
+                temporal_adj[j][j] = 1.0
+        for matrix in (spatial_adj, temporal_adj):
+            for i, row in enumerate(matrix):
+                degree = sum(row)
+                if degree > 0.0:
+                    matrix[i] = [value / degree for value in row]
+        self.register_buffer(
+            "detector_ids",
+            torch.tensor(detector_ids, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "node_coords",
+            torch.tensor(coords, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "node_time_ids",
+            torch.tensor(time_ids, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "spatial_adj",
+            torch.tensor(spatial_adj, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "temporal_adj",
+            torch.tensor(temporal_adj, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def forward(self, detector_events: Tensor, p_error: Tensor | None = None) -> Tensor:
+        node_states = self.event_state_embedding(detector_events.to(torch.long))
+        node_states = node_states + self.detector_embedding(self.detector_ids)[None, :, :]
+        node_states = node_states + self.coordinate_projection(self.node_coords)[None, :, :]
+        node_states = node_states + self.time_embedding(self.node_time_ids)[None, :, :]
+        physical_error_embedding = self._physical_error_embedding(detector_events, p_error)
+        node_states = node_states + physical_error_embedding[:, None, :]
+        for block in self.blocks:
+            node_states = block(node_states, self.spatial_adj, self.temporal_adj)
+        summary = node_states.mean(dim=1)
+        summary = (
+            summary
+            + self.flat_syndrome_projection(detector_events)
+            + physical_error_embedding
+        )
+        return self.head(summary).squeeze(-1)
+
+    def _physical_error_embedding(self, detector_events: Tensor, p_error: Tensor | None) -> Tensor:
+        if p_error is None:
+            p_error = detector_events.new_zeros((detector_events.shape[0],))
+        p_error = p_error.to(dtype=detector_events.dtype, device=detector_events.device)
+        raw_and_log = torch.stack([p_error, torch.log10(p_error.clamp_min(1e-6))], dim=-1)
+        return self.physical_error_projection(raw_and_log)
 
 
 class TrivialLinearDecoder(nn.Module):

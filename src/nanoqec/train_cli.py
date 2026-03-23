@@ -43,7 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset-manifest", type=Path, required=True)
     parser.add_argument(
         "--model-name",
-        choices=["minimal_aq2", "trivial_linear"],
+        choices=["minimal_aq2", "spacetime_gnn", "trivial_linear"],
         default="minimal_aq2",
     )
     parser.add_argument("--duration-seconds", type=float, default=120.0)
