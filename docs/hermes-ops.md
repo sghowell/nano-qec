@@ -111,8 +111,8 @@ Then the repo dry-run itself is:
 ```bash
 uv sync --all-extras
 uv run prepare.py --workspace . --profile local-d3-v1
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint checkpoints/best.pt
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
 
 If any command, path, or schema deviates from this runbook, Hermes must update
