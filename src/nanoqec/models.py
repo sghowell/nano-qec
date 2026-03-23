@@ -41,7 +41,7 @@ class LayoutSpec:
         coord_grid: list[list[list[float]]] = []
         valid_mask_grid: list[list[bool]] = []
         adjacency_grid: list[list[list[float]]] = []
-        graph_k = 2
+        graph_k = 3
         for bucket in time_bucket_indices:
             gather_row = [0] * max_time_bucket_size
             detector_row = [0] * max_time_bucket_size
