@@ -182,6 +182,7 @@ class LocalMessagePassing(nn.Module):
         self.message_projection = nn.Linear(d_model, d_model)
         self.message_gate = nn.Linear(2 * d_model, d_model)
         self.log_scale = nn.Parameter(torch.log(torch.tensor(init_scale, dtype=torch.float32)))
+        self.second_pass_logit = nn.Parameter(torch.tensor(-6.0, dtype=torch.float32))
 
     def forward(self, hidden: Tensor, adjacency: Tensor, valid_mask: Tensor) -> Tensor:
         neighbor_hidden = torch.einsum("ij,bjd->bid", adjacency, hidden)
@@ -229,6 +230,13 @@ class AQ2Block(nn.Module):
                     adjacency=adjacency[time_index],
                     valid_mask=valid_mask[time_index],
                 )
+                second_hidden = self.message_passing(
+                    hidden,
+                    adjacency=adjacency[time_index],
+                    valid_mask=valid_mask[time_index],
+                )
+                second_pass_weight = torch.sigmoid(self.message_passing.second_pass_logit)
+                hidden = hidden + second_pass_weight * (second_hidden - hidden)
             hidden = self.spatial(hidden, key_padding_mask=key_padding_mask)
             outputs.append(hidden)
         return torch.stack(outputs, dim=1)
