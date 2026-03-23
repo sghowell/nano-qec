@@ -26,10 +26,10 @@ Out of scope for the current local phase:
 - distance: `3`
 - rounds: `3`
 - physical error rates: `0.001`, `0.003`, `0.005`, `0.007`, `0.01`
-- default train shots per slice: `4096`
+- default train shots per slice: `8192`
 - default val shots per slice: `256`
-- primary research / promotion benchmark: train `4096`, val `1024`
-- continuity benchmark: train `4096`, val `256`
+- primary research / promotion benchmark: train `8192`, val `1024`
+- continuity benchmark: train `8192`, val `256`
 
 ### `local-d5-v1`
 
@@ -110,8 +110,9 @@ RESULT {"run_id":"...","val_ler":0.123,"mwpm_ratio":1.1,"kept":false}
 The primary `val_ler` in the `RESULT` line is the aggregate mean validation LER
 across all slices in the manifest profile.
 
-Current repo defaults use the `lion` optimizer, a `120` second wall-clock
-budget, and the `warmup_cosine` scheduler for local research runs.
+Current repo defaults use the `lion` optimizer, a `180` second wall-clock
+budget, and the `warmup_cosine` scheduler for local research runs. Current
+local-d3-v1 defaults also use the `spacetime_gnn` model.
 
 ### `eval.py`
 
@@ -193,7 +194,7 @@ no branch may be promoted automatically. `kept` means the run beat the best
 previous aggregate validation LER for the same dataset profile; it does not
 grant merge permission by itself.
 
-For `local-d3-v1`, promotion decisions should use the train `4096` / val `1024`
-benchmark as the primary research and promotion benchmark. The train `4096` /
+For `local-d3-v1`, promotion decisions should use the train `8192` / val `1024`
+benchmark as the primary research and promotion benchmark. The train `8192` /
 val `256` benchmark remains a continuity check and should still be reported, but
 it is secondary to the `val1024` benchmark when they disagree.

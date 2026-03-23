@@ -111,14 +111,14 @@ Then the repo dry-run itself is:
 ```bash
 uv sync --all-extras
 uv run prepare.py --workspace . --profile local-d3-v1
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --checkpoint checkpoints/best.pt
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
 
 If any command, path, or schema deviates from this runbook, Hermes must update
 the repo docs in the same branch as the code change.
 
-For `local-d3-v1`, Hermes should treat train `4096` / val `1024` as the
-primary research and promotion benchmark. Train `4096` / val `256` remains a
+For `local-d3-v1`, Hermes should treat train `8192` / val `1024` as the
+primary research and promotion benchmark. Train `8192` / val `256` remains a
 continuity check and should still be reported, but it is secondary when the two
 benchmarks disagree.

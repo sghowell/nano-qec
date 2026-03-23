@@ -44,9 +44,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-name",
         choices=["minimal_aq2", "spacetime_gnn", "trivial_linear"],
-        default="minimal_aq2",
+        default="spacetime_gnn",
     )
-    parser.add_argument("--duration-seconds", type=float, default=120.0)
+    parser.add_argument("--duration-seconds", type=float, default=180.0)
     parser.add_argument("--eval-interval-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--train-seed", type=int, default=20260323)

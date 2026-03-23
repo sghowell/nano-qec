@@ -100,11 +100,12 @@ uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-tr
 
 See `docs/hermes-ops.md` for the full repo mutation policy and dry-run workflow.
 
-Current `train.py` defaults use a `120s` local budget with the `lion` optimizer
-and the `warmup_cosine` schedule.
+Current `train.py` defaults use a `180s` local budget with the `lion` optimizer
+and the `warmup_cosine` schedule. Current defaults also use the `spacetime_gnn`
+model.
 
-For `local-d3-v1`, current research and promotion decisions use the train `4096`
-/ val `1024` benchmark as primary. The train `4096` / val `256` benchmark is
+For `local-d3-v1`, current research and promotion decisions use the train `8192`
+/ val `1024` benchmark as primary. The train `8192` / val `256` benchmark is
 still used as a continuity check.
 
 ## Validation
@@ -119,7 +120,7 @@ uv run pytest
 ```bash
 uv run python scripts/check_improvement.py --metrics-json results/train/<run>.json
 uv run python scripts/plot_progress.py --experiment-log results/experiments.jsonl --output results/progress.png
-uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
+uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
 ```
 
 `train.py` also supports an optional time-based warmup+cosine learning-rate

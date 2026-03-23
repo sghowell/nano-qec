@@ -103,9 +103,9 @@ def default_model_spec(model_name: str, layout: LayoutSpec) -> dict[str, Any]:
     if model_name == "spacetime_gnn":
         return {
             "d_model": 64,
-            "n_blocks": 4,
+            "n_blocks": 6,
             "dropout": 0.0,
-            "feedforward_mult": 4,
+            "feedforward_mult": 6,
             "time_steps": layout.time_steps,
             "detector_count": layout.detector_count,
         }

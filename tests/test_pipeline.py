@@ -99,7 +99,7 @@ def test_train_and_eval_smoke_for_two_models(tmp_path: Path, capsys) -> None:
     eval_output = capsys.readouterr().out
     assert Path(eval_summary["result_path"]).exists()
     eval_payload = json.loads(eval_output.strip())
-    assert eval_payload["model_name"] == "minimal_aq2"
+    assert eval_payload["model_name"] == "spacetime_gnn"
     assert eval_payload["decision_threshold"] == baseline_metrics_payload["decision_threshold"]
     assert len(eval_payload["per_slice"]) == 5
 
