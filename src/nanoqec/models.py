@@ -22,6 +22,7 @@ class LayoutSpec:
     detector_index_grid: list[list[int]]
     coord_grid: list[list[list[float]]]
     valid_mask_grid: list[list[bool]]
+    adjacency_grid: list[list[list[float]]]
 
     @classmethod
     def from_manifest(cls, manifest: DatasetManifest) -> LayoutSpec:
@@ -39,6 +40,8 @@ class LayoutSpec:
         detector_index_grid: list[list[int]] = []
         coord_grid: list[list[list[float]]] = []
         valid_mask_grid: list[list[bool]] = []
+        adjacency_grid: list[list[list[float]]] = []
+        graph_k = 2
         for bucket in time_bucket_indices:
             gather_row = [0] * max_time_bucket_size
             detector_row = [0] * max_time_bucket_size
@@ -49,10 +52,27 @@ class LayoutSpec:
                 detector_row[slot] = detector_index + 1
                 coord_row[slot] = list(normalized_xy[detector_index])
                 valid_row[slot] = True
+            adjacency_row = [[0.0] * max_time_bucket_size for _ in range(max_time_bucket_size)]
+            valid_slots = [slot for slot, is_valid in enumerate(valid_row) if is_valid]
+            for slot in valid_slots:
+                neighbor_pairs: list[tuple[float, int]] = []
+                for other_slot in valid_slots:
+                    if other_slot == slot:
+                        continue
+                    dx = coord_row[slot][0] - coord_row[other_slot][0]
+                    dy = coord_row[slot][1] - coord_row[other_slot][1]
+                    neighbor_pairs.append((dx * dx + dy * dy, other_slot))
+                adjacency_row[slot][slot] = 1.0
+                for _, other_slot in sorted(neighbor_pairs)[:graph_k]:
+                    adjacency_row[slot][other_slot] = 1.0
+                degree = sum(adjacency_row[slot][other] for other in valid_slots)
+                if degree > 0.0:
+                    adjacency_row[slot] = [weight / degree for weight in adjacency_row[slot]]
             gather_index_grid.append(gather_row)
             detector_index_grid.append(detector_row)
             coord_grid.append(coord_row)
             valid_mask_grid.append(valid_row)
+            adjacency_grid.append(adjacency_row)
         return cls(
             detector_count=int(manifest.detector_count),
             time_steps=len(time_bucket_indices),
@@ -61,6 +81,7 @@ class LayoutSpec:
             detector_index_grid=detector_index_grid,
             coord_grid=coord_grid,
             valid_mask_grid=valid_mask_grid,
+            adjacency_grid=adjacency_grid,
         )
 
 
@@ -153,6 +174,25 @@ class SpatialTransformer(nn.Module):
         return hidden
 
 
+class LocalMessagePassing(nn.Module):
+    """A lightweight learned local message-passing layer over one time bucket."""
+
+    def __init__(self, d_model: int, init_scale: float = 0.05) -> None:
+        super().__init__()
+        self.message_projection = nn.Linear(d_model, d_model)
+        self.message_gate = nn.Linear(2 * d_model, d_model)
+        self.log_scale = nn.Parameter(torch.log(torch.tensor(init_scale, dtype=torch.float32)))
+
+    def forward(self, hidden: Tensor, adjacency: Tensor, valid_mask: Tensor) -> Tensor:
+        neighbor_hidden = torch.einsum("ij,bjd->bid", adjacency, hidden)
+        gate_inputs = torch.cat([hidden, neighbor_hidden], dim=-1)
+        gate = torch.sigmoid(self.message_gate(gate_inputs))
+        message = self.message_projection(neighbor_hidden)
+        scale = torch.exp(self.log_scale)
+        updated = hidden + scale * gate * message
+        return updated * valid_mask[None, :, None].to(updated.dtype)
+
+
 class AQ2Block(nn.Module):
     """One AQ2-style temporal-plus-spatial processing block."""
 
@@ -163,9 +203,11 @@ class AQ2Block(nn.Module):
         dropout: float,
         feedforward_mult: int,
         n_transformer_per_block: int,
+        use_message_passing: bool = False,
     ) -> None:
         super().__init__()
         self.recurrence = DetectorGatedRecurrence(d_model)
+        self.message_passing = LocalMessagePassing(d_model) if use_message_passing else None
         self.spatial = SpatialTransformer(
             d_model=d_model,
             nhead=nhead,
@@ -174,13 +216,19 @@ class AQ2Block(nn.Module):
             n_layers=n_transformer_per_block,
         )
 
-    def forward(self, inputs: Tensor, valid_mask: Tensor) -> Tensor:
+    def forward(self, inputs: Tensor, valid_mask: Tensor, adjacency: Tensor) -> Tensor:
         batch_size, time_steps, token_count, hidden_dim = inputs.shape
         hidden = inputs.new_zeros((batch_size, token_count, hidden_dim))
         outputs: list[Tensor] = []
         for time_index in range(time_steps):
             key_padding_mask = ~valid_mask[time_index].unsqueeze(0).expand(batch_size, -1)
             hidden = self.recurrence(hidden, inputs[:, time_index, :, :])
+            if self.message_passing is not None:
+                hidden = self.message_passing(
+                    hidden,
+                    adjacency=adjacency[time_index],
+                    valid_mask=valid_mask[time_index],
+                )
             hidden = self.spatial(hidden, key_padding_mask=key_padding_mask)
             outputs.append(hidden)
         return torch.stack(outputs, dim=1)
@@ -269,8 +317,9 @@ class MinimalAQ2Decoder(nn.Module):
                     dropout=dropout,
                     feedforward_mult=feedforward_mult,
                     n_transformer_per_block=n_transformer_per_block,
+                    use_message_passing=(block_index == n_blocks - 1),
                 )
-                for _ in range(n_blocks)
+                for block_index in range(n_blocks)
             ]
         )
         self.temporal_compression = TemporalCompression(d_model=d_model, group_size=group_size)
@@ -303,6 +352,11 @@ class MinimalAQ2Decoder(nn.Module):
             persistent=False,
         )
         self.register_buffer(
+            "adjacency_grid",
+            torch.tensor(layout.adjacency_grid, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
             "time_index_grid",
             torch.arange(time_steps, dtype=torch.long),
             persistent=False,
@@ -322,8 +376,9 @@ class MinimalAQ2Decoder(nn.Module):
         valid_mask = self.valid_mask_grid
         hidden = hidden * valid_mask[None, :, :, None].to(hidden.dtype)
 
+        adjacency = self.adjacency_grid
         for block in self.blocks:
-            hidden = block(hidden, valid_mask=valid_mask)
+            hidden = block(hidden, valid_mask=valid_mask, adjacency=adjacency)
 
         pooled = self._masked_mean(hidden, valid_mask)
         compressed = self.temporal_compression(pooled)
