@@ -510,7 +510,12 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
     best_selection_aggregate: dict[str, Any] | None = None
     eval_history: list[dict[str, Any]] = []
     num_slices = len(slice_arrays)
-    slice_weights = np.ones(num_slices, dtype=np.float64) / num_slices
+    p_values = [dataset_slice.p_error for dataset_slice in slice_arrays]
+    p_weights = np.array(p_values, dtype=np.float64)
+    p_weights = p_weights / p_weights.sum()
+    uniform = np.ones(num_slices, dtype=np.float64) / num_slices
+    slice_weights = 0.6 * p_weights + 0.4 * uniform
+    slice_weights = slice_weights / slice_weights.sum()
 
     while True:
         elapsed = time.perf_counter() - start_time
@@ -548,7 +553,6 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
                 slice_arrays,
                 device,
             )
-            slice_weights = compute_slice_sampling_weights(per_slice, num_slices)
             eval_history.append(
                 {
                     "elapsed_seconds": elapsed,
