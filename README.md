@@ -103,6 +103,10 @@ See `docs/hermes-ops.md` for the full repo mutation policy and dry-run workflow.
 Current `train.py` defaults use a `120s` local budget with the `lion` optimizer
 and the `warmup_cosine` schedule.
 
+For `local-d3-v1`, current research and promotion decisions use the train `4096`
+/ val `1024` benchmark as primary. The train `4096` / val `256` benchmark is
+still used as a continuity check.
+
 ## Validation
 
 ```bash
