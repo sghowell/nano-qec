@@ -18,8 +18,8 @@ contracts, schemas, validation, and operating rules.
 ```bash
 uv sync --all-extras
 uv run prepare.py --workspace . --profile local-d3-v1
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint checkpoints/best.pt
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
 
 ## Using Hermes Directly
@@ -94,13 +94,13 @@ Documented NanoQEC dry-run:
 ```bash
 uv sync --all-extras
 uv run prepare.py --workspace . --profile local-d3-v1
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint checkpoints/best.pt
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
 
 See `docs/hermes-ops.md` for the full repo mutation policy and dry-run workflow.
 
-Current `train.py` defaults use a `60s` local budget with the `lion` optimizer
+Current `train.py` defaults use a `120s` local budget with the `lion` optimizer
 and the `warmup_cosine` schedule.
 
 ## Validation
@@ -115,7 +115,7 @@ uv run pytest
 ```bash
 uv run python scripts/check_improvement.py --metrics-json results/train/<run>.json
 uv run python scripts/plot_progress.py --experiment-log results/experiments.jsonl --output results/progress.png
-uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
+uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
 ```
 
 `train.py` also supports an optional time-based warmup+cosine learning-rate

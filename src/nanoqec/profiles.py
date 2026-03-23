@@ -28,7 +28,7 @@ PROFILES: dict[str, ProfileSpec] = {
         distance=3,
         rounds=3,
         p_errors=(0.001, 0.003, 0.005, 0.007, 0.01),
-        default_train_shots=1024,
+        default_train_shots=4096,
         default_val_shots=256,
         description="Local d=3 research profile with a five-rate validation sweep.",
     ),

@@ -26,7 +26,7 @@ Out of scope for the current local phase:
 - distance: `3`
 - rounds: `3`
 - physical error rates: `0.001`, `0.003`, `0.005`, `0.007`, `0.01`
-- default train shots per slice: `1024`
+- default train shots per slice: `4096`
 - default val shots per slice: `256`
 
 ### `local-d5-v1`
@@ -108,7 +108,7 @@ RESULT {"run_id":"...","val_ler":0.123,"mwpm_ratio":1.1,"kept":false}
 The primary `val_ler` in the `RESULT` line is the aggregate mean validation LER
 across all slices in the manifest profile.
 
-Current repo defaults use the `lion` optimizer, a `60` second wall-clock
+Current repo defaults use the `lion` optimizer, a `120` second wall-clock
 budget, and the `warmup_cosine` scheduler for local research runs.
 
 ### `eval.py`

@@ -46,7 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["minimal_aq2", "trivial_linear"],
         default="minimal_aq2",
     )
-    parser.add_argument("--duration-seconds", type=float, default=60.0)
+    parser.add_argument("--duration-seconds", type=float, default=120.0)
     parser.add_argument("--eval-interval-seconds", type=float, default=10.0)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--train-seed", type=int, default=20260323)
@@ -241,6 +241,64 @@ def balanced_bce_loss(
         pos_weight=torch.tensor(pos_weight, dtype=logits.dtype, device=logits.device),
     )
     return 0.5 * (unweighted + weighted)
+
+
+def compute_slice_sampling_weights(
+    per_slice: list[dict[str, Any]],
+    num_slices: int,
+) -> np.ndarray:
+    """Compute slice sampling weights from per-slice MWPM ratios.
+
+    Slices with higher MWPM ratio (worse relative to MWPM) get more training
+    time. Uses softmax over clipped log-ratios for smooth, bounded weighting.
+    Falls back to uniform when no per-slice data is available.
+    """
+    if not per_slice or len(per_slice) != num_slices:
+        return np.ones(num_slices, dtype=np.float64) / num_slices
+    ratios = np.array(
+        [max(s.get("mwpm_ratio", 1.0), 1.0) for s in per_slice],
+        dtype=np.float64,
+    )
+    finite_mask = np.isfinite(ratios)
+    if finite_mask.any():
+        max_finite = ratios[finite_mask].max()
+        ratios[~finite_mask] = max_finite
+    log_ratios = np.log(np.clip(ratios, 1.0, 50.0))
+    temperature = 1.0
+    shifted = log_ratios / temperature
+    shifted -= shifted.max()
+    weights = np.exp(shifted)
+    weights /= weights.sum()
+    uniform = np.ones(num_slices, dtype=np.float64) / num_slices
+    blend_alpha = 0.5
+    blended = blend_alpha * weights + (1.0 - blend_alpha) * uniform
+    blended /= blended.sum()
+    return blended
+
+
+def focal_bce_loss(
+    logits: Tensor,
+    labels: Tensor,
+    pos_weight: float,
+    gamma: float = 2.0,
+) -> Tensor:
+    """Focal loss variant of balanced BCE that down-weights easy examples.
+
+    Focuses training on hard-to-classify samples, which helps mid-range
+    error rate slices where confident wrong predictions waste gradient signal.
+    """
+    probs = torch.sigmoid(logits)
+    p_t = probs * labels + (1.0 - probs) * (1.0 - labels)
+    focal_weight = (1.0 - p_t) ** gamma
+    unweighted = F.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+    weighted = F.binary_cross_entropy_with_logits(
+        logits,
+        labels,
+        pos_weight=torch.tensor(pos_weight, dtype=logits.dtype, device=logits.device),
+        reduction="none",
+    )
+    base_loss = 0.5 * (unweighted + weighted)
+    return (focal_weight.detach() * base_loss).mean()
 
 
 def select_decision_threshold(
@@ -451,6 +509,8 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
     best_state_dict = copy.deepcopy(model.state_dict())
     best_selection_aggregate: dict[str, Any] | None = None
     eval_history: list[dict[str, Any]] = []
+    num_slices = len(slice_arrays)
+    slice_weights = np.ones(num_slices, dtype=np.float64) / num_slices
 
     while True:
         elapsed = time.perf_counter() - start_time
@@ -467,12 +527,13 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
                 min_learning_rate_scale=args.min_learning_rate_scale,
             ),
         )
-        selected_slice = slice_arrays[int(rng.integers(0, len(slice_arrays)))]
+        slice_idx = int(rng.choice(num_slices, p=slice_weights))
+        selected_slice = slice_arrays[slice_idx]
         batch_x, batch_y = sample_train_batch(selected_slice, args.batch_size, rng, device)
         batch_p_error = build_p_error_batch(selected_slice.p_error, len(batch_x), device)
         optimizer.zero_grad(set_to_none=True)
         logits = forward_model(model, batch_x, batch_p_error)
-        loss = balanced_bce_loss(logits, batch_y, selected_slice.train_pos_weight)
+        loss = focal_bce_loss(logits, batch_y, selected_slice.train_pos_weight)
         loss.backward()
         optimizer.step()
 
@@ -487,6 +548,7 @@ def run_train(args: argparse.Namespace) -> dict[str, Any]:
                 slice_arrays,
                 device,
             )
+            slice_weights = compute_slice_sampling_weights(per_slice, num_slices)
             eval_history.append(
                 {
                     "elapsed_seconds": elapsed,
