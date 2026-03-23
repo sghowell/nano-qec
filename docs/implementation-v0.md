@@ -28,6 +28,8 @@ Out of scope for the current local phase:
 - physical error rates: `0.001`, `0.003`, `0.005`, `0.007`, `0.01`
 - default train shots per slice: `4096`
 - default val shots per slice: `256`
+- primary research / promotion benchmark: train `4096`, val `1024`
+- continuity benchmark: train `4096`, val `256`
 
 ### `local-d5-v1`
 
@@ -190,3 +192,8 @@ The current local phase may append runtime experiment records automatically, but
 no branch may be promoted automatically. `kept` means the run beat the best
 previous aggregate validation LER for the same dataset profile; it does not
 grant merge permission by itself.
+
+For `local-d3-v1`, promotion decisions should use the train `4096` / val `1024`
+benchmark as the primary research and promotion benchmark. The train `4096` /
+val `256` benchmark remains a continuity check and should still be reported, but
+it is secondary to the `val1024` benchmark when they disagree.
