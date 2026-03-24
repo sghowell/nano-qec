@@ -133,3 +133,71 @@ def test_tuning_script_runs_one_repeat(tmp_path: Path) -> None:
         20260323,
         20260323,
     ]
+
+
+def test_cloud_bootstrap_plan_script_outputs_expected_steps(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    bootstrap_output = run_script(
+        repo_root / "scripts" / "bootstrap_cloud.py",
+        "--repo-root",
+        str(tmp_path / "nano-qec"),
+        "--plan-only",
+    )
+    assert bootstrap_output["plan_only"] is True
+    commands = bootstrap_output["commands"]
+    assert any("nvidia-smi" in command for command in commands)
+    assert any("uv sync --all-extras" in command for command in commands)
+    assert any("uv run pytest" in command for command in commands)
+
+
+def test_cloud_run_script_executes_prepare_train_eval_cycle(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    cloud_output = run_script(
+        repo_root / "scripts" / "run_cloud_profile.py",
+        "--workspace",
+        str(tmp_path),
+        "--profile",
+        "local-d3-v1",
+        "--train-shots",
+        "32",
+        "--val-shots",
+        "16",
+        "--device",
+        "cpu",
+        "--duration-seconds",
+        "0.1",
+        "--eval-interval-seconds",
+        "0.1",
+        "--batch-size",
+        "16",
+        "--skip-experiment-log",
+        "--skip-plot",
+        "--hypothesis",
+        "test cloud helper run",
+    )
+    assert Path(str(cloud_output["manifest_path"])).exists()
+    assert Path(str(cloud_output["train"]["best_checkpoint_path"])).exists()
+    assert Path(str(cloud_output["train"]["metrics_path"])).exists()
+    assert Path(str(cloud_output["eval"]["result_path"])).exists()
+    assert cloud_output["train"]["result"]["run_id"]
+    assert cloud_output["eval"]["summary"]["dataset_id"].startswith("local-d3-v1")
+
+
+def test_fetch_cloud_artifacts_script_prints_rsync_commands(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    fetch_output = run_script(
+        repo_root / "scripts" / "fetch_cloud_artifacts.py",
+        "--remote-host",
+        "ubuntu@example",
+        "--remote-repo-root",
+        "/home/ubuntu/src/nano-qec",
+        "--local-workspace",
+        str(tmp_path),
+        "--print-only",
+        "--include-data",
+    )
+    assert fetch_output["print_only"] is True
+    commands = fetch_output["commands"]
+    assert any("checkpoints/" in command for command in commands)
+    assert any("results/" in command for command in commands)
+    assert any("data/" in command for command in commands)
