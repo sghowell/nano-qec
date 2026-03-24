@@ -4,19 +4,20 @@
 
 This document freezes the current local implementation boundary for NanoQEC.
 
-- Local single-host execution only
+- Operator-managed single-host execution only (local or cloud)
 - `surface_code:rotated_memory_x`
 - supported profiles: `local-d3-v1`, `local-d5-v1`
 - one logical observable
 - profile-level multi-rate validation sweeps
 - deterministic cached training and validation data
 - `uv` as the only package and task runner
+- identical CLI, artifact, schema, and `RESULT` contracts across local and cloud hosts
 
-Out of scope for the current local phase:
+Out of scope for the current v0 phase:
 
 - mixed-distance training in a single run
-- Prime Intellect integration
-- cron or overnight scheduling
+- provider-specific orchestration or autoscaling
+- cron or autonomous overnight scheduling
 - automatic promotion to `main`
 
 ## Profiles
@@ -64,6 +65,21 @@ threshold after training.
 - Time budgets apply to training only and exclude cache generation.
 - The same dataset manifest must identify the same artifact paths and metadata
   across repeated `prepare.py` runs unless `--force` is used.
+
+## Execution Environments
+
+Local and cloud runs must use the same repository revision, the same public
+entrypoints, and the same artifact contracts. Cloud support in v0 means
+operator-managed single-host execution only. The recommended repo-local helpers
+are:
+
+- `scripts/bootstrap_cloud.py` for repo-local cloud preflight/bootstrap
+- `scripts/run_cloud_profile.py` for prepare/train/eval orchestration on one host
+- `scripts/fetch_cloud_artifacts.py` for syncing results back to the local control machine
+
+These helpers may automate commands around the public harness, but they must not
+change `prepare.py`, `train.py`, `eval.py`, shared schemas, or the `RESULT`
+line contract.
 
 ## CLI Contracts
 

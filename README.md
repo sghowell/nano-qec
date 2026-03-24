@@ -121,6 +121,9 @@ uv run pytest
 uv run python scripts/check_improvement.py --metrics-json results/train/<run>.json
 uv run python scripts/plot_progress.py --experiment-log results/experiments.jsonl --output results/progress.png
 uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
+uv run python scripts/bootstrap_cloud.py --repo-root . --plan-only
+uv run python scripts/run_cloud_profile.py --workspace . --profile local-d5-v1 --device cuda --hypothesis "single-host cloud baseline"
+uv run python scripts/fetch_cloud_artifacts.py --remote-host ubuntu@<host> --remote-repo-root ~/src/nano-qec --local-workspace . --print-only
 ```
 
 `train.py` also supports an optional time-based warmup+cosine learning-rate

@@ -42,7 +42,8 @@ Hermes should read these files before changing behavior:
 - changing protected schemas without synchronized tests and doc updates
 - changing the evaluation policy ad hoc
 - automatic merges to `main`
-- cloud, cron, or multi-host setup changes as part of a local v0 run
+- multi-host, autoscaled, or provider-specific orchestration changes beyond the documented single-host cloud helpers
+- cron or autonomous scheduling changes in v0
 
 ## Branch Workflow
 
@@ -114,6 +115,18 @@ uv run prepare.py --workspace . --profile local-d3-v1
 uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json
 uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json --checkpoint checkpoints/best.pt
 ```
+
+For operator-managed single-host cloud runs, use the repo-local helpers from the
+repo root after cloning the same commit to the cloud host:
+
+```bash
+uv run python scripts/bootstrap_cloud.py --repo-root .
+uv run python scripts/run_cloud_profile.py --workspace . --profile local-d5-v1 --device cuda --hypothesis "single-host cloud baseline"
+uv run python scripts/fetch_cloud_artifacts.py --remote-host ubuntu@<host> --remote-repo-root ~/src/nano-qec --local-workspace .
+```
+
+The cloud helpers are wrappers around the documented public harness. They do not
+change the CLI contracts, schemas, or promotion policy.
 
 If any command, path, or schema deviates from this runbook, Hermes must update
 the repo docs in the same branch as the code change.

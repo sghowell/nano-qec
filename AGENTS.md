@@ -23,10 +23,13 @@ merging.
 - Hermes is the primary operator for experiment execution.
 - The repository is the source of truth for behavior, contracts, and guardrails.
 - `SKILL.md` and `program.md` are adapters that point back to this repository.
-- The current implementation target is local-only profile training using `uv`.
+- The current implementation target is single-host profile training using `uv`.
+- Supported execution environments are local single-host runs and
+  operator-managed single-host cloud GPU runs that preserve the documented CLI,
+  artifact, and schema contracts.
 - Supported research profiles are `local-d3-v1` and `local-d5-v1`.
-- Cloud GPUs, mixed-distance training, cron scheduling, and autonomous
-  promotion remain deferred until the local harness is stable.
+- Multi-host training, provider-specific orchestration, cron scheduling, and
+  autonomous promotion remain deferred in v0.
 
 ## Protected Boundaries
 
