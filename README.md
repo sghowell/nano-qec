@@ -1,7 +1,16 @@
-# NanoQEC
+```
+    ███    ██  █████  ███    ██  ██████   ██████  ███████  ██████
+    ████   ██ ██   ██ ████   ██ ██    ██ ██    ██ ██      ██
+    ██ ██  ██ ███████ ██ ██  ██ ██    ██ ██    ██ █████   ██
+    ██  ██ ██ ██   ██ ██  ██ ██ ██    ██ ██ ▄▄ ██ ██      ██
+    ██   ████ ██   ██ ██   ████  ██████   ██████  ███████  ██████
+                                             ▀▀
+    ───────────────────────────────────────────────────────────────
+    neural quantum error correction
+```
 
 NanoQEC is a harness-first repo for autonomous neural quantum error-correction
-experiments. The repository, not the agent runtime, is the source of truth for
+experiments. This repository is the source of truth for
 contracts, schemas, validation, and operating rules.
 
 ## Source Of Truth
