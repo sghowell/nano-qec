@@ -1,6 +1,5 @@
 # NanoQEC: Autoresearch for Neural Quantum Error Correction
 
-**Zetetic Works Research Corporation**
 **March 2026**
 
 ---
