@@ -9,6 +9,13 @@
     neural quantum error correction
 ```
 
+[![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](./pyproject.toml)
+[![CI](https://github.com/sghowell/nano-qec/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sghowell/nano-qec/actions/workflows/ci.yml)
+[![Managed with uv](https://img.shields.io/badge/managed%20with-uv-DE5FE9?logo=uv&logoColor=white)](./uv.lock)
+[![Implementation v0](https://img.shields.io/badge/spec-implementation%20v0-FF6F00)](./docs/implementation-v0.md)
+[![Hermes Operated](https://img.shields.io/badge/operator-Hermes-111111)](./docs/hermes-ops.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2EA44F)](./LICENSE)
+
 NanoQEC is a harness-first repo for autonomous neural quantum error-correction
 experiments. This repository is the source of truth for
 contracts, schemas, validation, and operating rules.
