@@ -16,139 +16,84 @@
 [![Hermes Operated](https://img.shields.io/badge/operator-Hermes-111111)](./docs/hermes-ops.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2EA44F)](./LICENSE)
 
-NanoQEC is a harness-first repo for autonomous neural quantum error-correction
-experiments. This repository is the source of truth for
-contracts, schemas, validation, and operating rules.
+NanoQEC is a harness-first research repository for neural quantum
+error-correction experiments. It combines deterministic data preparation,
+stable `prepare.py` / `train.py` / `eval.py` entrypoints, explicit benchmark
+policy, and machine-readable artifacts so humans and agents can improve local
+surface-code decoders without drifting the protocol.
 
-## Source Of Truth
+## Implemented Today
 
-- `AGENTS.md`: operational authority for humans and Hermes.
-- `docs/implementation-v0.md`: current local implementation spec and CLI
-  contracts.
-- `docs/hermes-ops.md`: Hermes runbook and mutation policy.
-- `docs/nanoqec-plan.md`: long-horizon architecture and research strategy.
-- `archived/`: historical reference files that may lag the implementation.
+As of April 9, 2026, this repository implements:
+
+- single-host local runs with `uv`
+- operator-managed single-host cloud GPU runs that preserve the same public
+  CLI and artifact contracts
+- two supported research profiles: `local-d3-v1` and `local-d5-v1`
+- reproducible dataset preparation, training, evaluation, and experiment logs
+- a promoted `local-d3-v1` graph-native decoder regime documented in the repo
+
+Future direction remains in [docs/nanoqec-plan.md](./docs/nanoqec-plan.md). The
+authoritative operational and contract docs remain
+[AGENTS.md](./AGENTS.md),
+[docs/implementation-v0.md](./docs/implementation-v0.md), and
+[docs/hermes-ops.md](./docs/hermes-ops.md).
+
+## Headline Result
+
+As of March 24, 2026, NanoQEC’s promoted `local-d3-v1` regime is a
+`spacetime_gnn` decoder with `6` graph blocks, `feedforward_mult=6`,
+`8192` training shots, and a `180s` training budget. The repeated
+primary-benchmark evidence recorded in
+[results/overnight/hermes-d3-final-promotion-20260324.md](./results/overnight/hermes-d3-final-promotion-20260324.md)
+reports aggregate MWPM ratios `0.9420`, `0.9565`, and `0.9783`, for a mean of
+`0.959` on the `train8192 / val1024` benchmark.
+
+See [docs/human/results.md](./docs/human/results.md) for the benchmark policy,
+evidence trail, figures, and limitations.
 
 ## Quickstart
 
-```bash
-uv sync --all-extras
-uv run prepare.py --workspace . --profile local-d3-v1
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --checkpoint checkpoints/best.pt
-```
-
-## Using Hermes Directly
-
-Run Hermes from the repo root so it can see the NanoQEC authority docs and
-artifacts.
-
-Preflight:
-
-```bash
-hermes model
-hermes status
-```
-
-Interactive CLI/TUI session:
-
-```bash
-hermes chat
-```
-
-Suggested first prompt:
-
-```text
-Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md, then summarize the current NanoQEC operating rules before making any changes.
-```
-
-Sample prompts for an autoresearch kickoff:
-
-```text
-Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md. Then run one bounded local-d3-v1 decoder-improvement experiment on a short-lived exp branch. Stay inside the protected harness contracts, use the existing prepare/train/eval entrypoints, and do not merge automatically. When done, report the hypothesis, exact code changes, aggregate val_ler, aggregate mwpm_ratio, and whether the branch should be kept or discarded.
-```
-
-```text
-Read the NanoQEC authority docs, inspect the most recent local-d3-v1 results, and propose the highest-signal next experiment to reduce aggregate mwpm_ratio. Before changing code, explain the hypothesis, the files you plan to edit, and the validation path you will run.
-```
-
-Sample prompts for querying recent runs:
-
-```text
-Read results/experiments.jsonl and summarize the 5 most recent runs. For each, report branch, hypothesis, aggregate val_ler, aggregate mwpm_ratio, kept/discarded, and the most important takeaway.
-```
-
-```text
-Inspect the latest training and evaluation artifacts for local-d3-v1 and tell me which physical-error-rate slices are currently weakest relative to MWPM. Use concrete numbers and suggest one targeted follow-up experiment.
-```
-
-```text
-Compare the current default decoder settings against the best recent run you can find in results/experiments.jsonl and results/train/. Tell me what changed, whether the newer run is reproducibly better, and what evidence is still missing before promotion.
-```
-
-One-shot repo-root query:
-
-```bash
-hermes chat -Q -q "Read AGENTS.md, docs/implementation-v0.md, and docs/hermes-ops.md from the current repo, then reply with a one-line readiness summary."
-```
-
-Resume a previous session:
-
-```bash
-hermes -c
-hermes sessions browse
-```
-
-Run Hermes in an isolated git worktree:
-
-```bash
-hermes chat --worktree
-```
-
-Documented NanoQEC dry-run:
+This first run keeps the repository clean by writing checkpoints and evaluation
+outputs to `/tmp`.
 
 ```bash
 uv sync --all-extras
-uv run prepare.py --workspace . --profile local-d3-v1
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json
-uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train4096-val256/manifest.json --checkpoint checkpoints/best.pt
+uv run prepare.py --workspace . --profile local-d3-v1 --train-shots 1024 --val-shots 256
+uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --duration-seconds 30 --device auto --checkpoint-dir /tmp/nanoqec-quickstart/checkpoints --results-dir /tmp/nanoqec-quickstart/results/train --experiment-log /tmp/nanoqec-quickstart/results/experiments.jsonl --skip-experiment-log
+uv run eval.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --checkpoint /tmp/nanoqec-quickstart/checkpoints/best.pt --device auto --results-dir /tmp/nanoqec-quickstart/results/eval
 ```
 
-See `docs/hermes-ops.md` for the full repo mutation policy and dry-run workflow.
+Successful completion should leave you with:
 
-Current `train.py` defaults use a `180s` local budget with the `lion` optimizer
-and the `warmup_cosine` schedule. Current defaults also use the `spacetime_gnn`
-model.
+- `data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json`
+- `/tmp/nanoqec-quickstart/checkpoints/best.pt`
+- `/tmp/nanoqec-quickstart/results/train/<run-id>.json`
+- `/tmp/nanoqec-quickstart/results/eval/best-eval.json`
 
-For `local-d3-v1`, current research and promotion decisions use the train `8192`
-/ val `1024` benchmark as primary. The train `8192` / val `256` benchmark is
-still used as a continuity check.
+For a fuller walkthrough, failure recovery, and the canonical promoted benchmark
+lane, start with [docs/human/quickstart.md](./docs/human/quickstart.md).
 
-## Validation
+## Human Docs
 
-```bash
-uv run ruff check .
-uv run pytest
-```
+- [Start here](./docs/human/index.md)
+- [Project overview](./docs/human/overview.md)
+- [Quickstart](./docs/human/quickstart.md)
+- [Concepts](./docs/human/concepts.md)
+- [Results and evidence](./docs/human/results.md)
+- [Architecture](./docs/human/architecture.md)
+- [Using Hermes safely](./docs/human/using-hermes.md)
+- [Contributing](./docs/human/contributing.md)
+- [FAQ](./docs/human/faq.md)
+- [Glossary](./docs/human/glossary.md)
 
-## Experiment Utilities
+## Authority Docs
 
-```bash
-uv run python scripts/check_improvement.py --metrics-json results/train/<run>.json
-uv run python scripts/plot_progress.py --experiment-log results/experiments.jsonl --output results/progress.png
-uv run python scripts/tune_profile.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train8192-val256/manifest.json --config baseline --config warmup_cosine --duration-seconds 30 --duration-seconds 60 --repeats 3 --eval-interval-seconds 5 --device mps
-uv run python scripts/bootstrap_cloud.py --repo-root . --plan-only
-uv run python scripts/run_cloud_profile.py --workspace . --profile local-d5-v1 --device cuda --hypothesis "single-host cloud baseline"
-uv run python scripts/fetch_cloud_artifacts.py --remote-host ubuntu@<host> --remote-repo-root ~/src/nano-qec --local-workspace . --print-only
-```
+These remain the source of truth for behavior and policy:
 
-`train.py` also supports an optional time-based warmup+cosine learning-rate
-schedule for fixed-budget runs:
+- [AGENTS.md](./AGENTS.md)
+- [docs/implementation-v0.md](./docs/implementation-v0.md)
+- [docs/hermes-ops.md](./docs/hermes-ops.md)
 
-```bash
-uv run train.py --workspace . --dataset-manifest data/local-d3-v1-d3-r3-5rates-train1024-val256/manifest.json --scheduler warmup_cosine --warmup-fraction 0.1 --min-learning-rate-scale 0.1
-```
-
-Training metrics JSON now includes `eval_history`, which records periodic
-aggregate validation snapshots across the run so plateauing and schedule effects
-can be diagnosed after the fact.
+Human-facing docs summarize those contracts for readability. They do not
+override them.
